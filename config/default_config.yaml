@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# therapy_ai / config / default_config.yaml
+#
+# All runtime configuration lives here.
+# To switch model: change model_id. No code changes needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+model:
+  # ── Model selection ──────────────────────────────────────────────────────
+  # Recommended: Qwen3 8B Q4_K_M (best quality/speed on M4 16GB+)
+  # Lightweight: google/gemma-3-4b-it   (M4 8GB, RTX 4060 8GB VRAM)
+  model_id: "Qwen/Qwen3-8B-Instruct"
+
+  # Quantisation: q4_k_m | q8_0 | f16 | none
+  # q4_k_m = ~5 GB on disk, best quality-per-byte
+  quantization: "q4_k_m"
+
+  # Context window. 4096 is safe for M4 16GB + Qwen3 8B Q4
+  max_seq_length: 4096
+
+  # dtype: null = auto (bfloat16 on M-series and Ampere+)
+  dtype: null
+
+  # QLoRA 4-bit base on CUDA. Ignored on MLX.
+  load_in_4bit: true
+
+  # Path to a trained LoRA adapter (null = base model only)
+  adapter_path: null
+
+
+inference:
+  temperature: 0.75         # Higher = more creative, lower = more focused
+  top_p: 0.90
+  repetition_penalty: 1.10
+  max_new_tokens: 512
+
+
+storage:
+  db_path: "data/sessions.db"
+  salt_file: "data/.salt"
+  finetune_dir: "data/finetune"
+  adapters_dir: "data/adapters"
+
+
+ui:
+  locale: "DE"              # Used for localised emergency resources
+  theme: "calm"             # calm | dark | light (future use)
+  show_token_count: false
+
+
+logging:
+  level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+  log_file: "data/therapy_ai.log"

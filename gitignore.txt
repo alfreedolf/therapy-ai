@@ -1,0 +1,54 @@
+# ── Project / data artefacts ──────────────────────────────────────────────────
+data/
+!data/.gitkeep
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Model weights (large files — use HF Hub or LFS) ──────────────────────────
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+models/
+
+# ── Secrets / environment ─────────────────────────────────────────────────────
+.env
+*.key
+*.pem
+
+# ── macOS / editor ────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+*.swp
+*.swo
+
+# ── VSCode ────────────────────────────────────────────────────────────────────
+.vscode/settings.json    # keep extensions.json but not personal settings
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml

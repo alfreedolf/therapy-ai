@@ -1,0 +1,102 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "therapy-ai"
+version = "0.1.0"
+description = "Privacy-preserving local AI psychotherapy system"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+# ── Core dependencies (platform-agnostic) ─────────────────────────────────────
+dependencies = [
+    "streamlit>=1.35",
+    "pyyaml>=6.0",
+    "cryptography>=42.0",
+    "sqlalchemy>=2.0",
+    "rich>=13.0",          # beautiful CLI output
+    "typer>=0.12",         # CLI launcher
+    "pydantic>=2.7",       # config validation
+    "huggingface-hub>=0.23",
+    "datasets>=2.19",
+    "transformers>=4.41",
+    "tokenizers>=0.19",
+    "tqdm>=4.66",
+    "pandas>=2.2",
+    "plotly>=5.22",        # mood charts in Streamlit
+    "python-dotenv>=1.0",
+    # ── Semantic memory (runs locally, no API) ──────────────────────────────
+    "sentence-transformers>=3.0",    # local embedding model (all-MiniLM-L6-v2, 22 MB)
+    "sqlite-vec>=0.1",               # vector search inside existing SQLite DB
+]
+
+# ── Optional platform-specific extras ─────────────────────────────────────────
+[project.optional-dependencies]
+
+mac = [
+    "mlx>=0.15",
+    "mlx-lm>=0.15",
+    # mlx-tune installed separately from GitHub (see README)
+    # llama.cpp backend (alternative to MLX for inference-only use):
+    "llama-cpp-python>=0.2.90",      # auto-detects Metal GPU on Apple Silicon
+]
+
+cuda = [
+    "torch>=2.3",
+    "unsloth[colab-new]>=2024.6",    # Unsloth unified API matching mlx-tune
+    "bitsandbytes>=0.43",
+    "accelerate>=0.30",
+    "peft>=0.11",
+    "trl>=0.9",
+    # llama.cpp backend (alternative to unsloth for inference-only use):
+    "llama-cpp-python>=0.2.90",      # install with CMAKE_ARGS="-DGGML_CUDA=on" for CUDA
+]
+
+llamacpp = [
+    # Standalone install if you want llama.cpp only (no MLX, no CUDA training).
+    # On Mac:    pip install llama-cpp-python (Metal auto-detected)
+    # On NVIDIA: CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+    "llama-cpp-python>=0.2.90",
+]
+
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",           # linter + formatter
+    "mypy>=1.10",
+    "pre-commit>=3.7",
+    "ipykernel>=6.29",     # for exploratory notebooks (separate from prod code)
+]
+
+[project.scripts]
+therapy-ai = "therapy_ai.main:app"
+
+# ── Setuptools package discovery ──────────────────────────────────────────────
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["therapy_ai*"]
+
+# ── Ruff (linter / formatter) ─────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+# ── Mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=therapy_ai --cov-report=term-missing"

@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# therapy_ai / config / training_config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+training:
+  # Method: "sft" (supervised fine-tuning) | "grpo" | "dpo"
+  # Start with "sft". Switch to "grpo" once you have user ratings in sessions.
+  method: "sft"
+
+  output_dir: "data/adapters/run_001"
+
+  num_epochs: 3
+  batch_size: 2
+  grad_accumulation_steps: 4   # effective batch = 2 × 4 = 8
+
+  learning_rate: 0.0002         # 2e-4 — standard for LoRA SFT
+  warmup_steps: 10
+  max_seq_length: 2048
+
+  save_steps: 50
+  eval_steps: 50
+  logging_steps: 10
+
+  bf16: true                    # bfloat16 on M-series and Ampere+; falls back to fp16
+  seed: 42
+
+  lora:
+    r: 16                       # Rank. 8–32 is typical. Higher = more capacity.
+    lora_alpha: 32              # Scale = alpha / r. Keep alpha = 2×r.
+    lora_dropout: 0.05
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+    bias: "none"
+    use_rslora: true            # Rank-Stabilized LoRA — better for small datasets
