@@ -34,13 +34,12 @@ dependencies = [
 
 # ── Optional platform-specific extras ─────────────────────────────────────────
 [project.optional-dependencies]
-
 mac = [
     "mlx>=0.15",
     "mlx-lm>=0.15",
-    # mlx-tune installed separately from GitHub (see README)
-    # llama.cpp backend (alternative to MLX for inference-only use):
-    "llama-cpp-python>=0.2.90",      # auto-detects Metal GPU on Apple Silicon
+    "torch>=2.3.0; platform_system=='Darwin'",  # CPU-only PyTorch for Mac deps
+    "torchvision>=0.18.0; platform_system=='Darwin'",  # Resolves transitive deps
+    "llama-cpp-python>=0.2.90",
 ]
 
 cuda = [

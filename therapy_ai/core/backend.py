@@ -77,14 +77,17 @@ class BackendFactory:
         mlx-tune and unsloth share an identical API surface intentionally.
         """
         backend = (info or cls.detect()).backend
-
+        
         if backend == HardwareBackend.MLX:
             try:
-                from mlx_lm import load  # noqa: F401 — validate availability
+                # Try mlx_tune first (Unsloth-like API)
+                import mlx_tune
                 from mlx_tune import FastLanguageModel
+                logger.info("Using mlx_tune FastLanguageModel")
                 return FastLanguageModel
             except ImportError:
-                logger.warning("mlx_tune not found — falling back to mlx_lm directly.")
+                logger.warning("mlx_tune unavailable — using mlx_lm standard load")
+                # Fallback to standard mlx_lm (your _MLXCompatWrapper handles it perfectly)
                 from mlx_lm import load
                 return _MLXCompatWrapper(load)
 

@@ -81,4 +81,8 @@ def check(
 
 
 if __name__ == "__main__":
-    app()
+    try:
+        app()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Interrupted by user (Ctrl+C)[/yellow]")
+        sys.exit(0)

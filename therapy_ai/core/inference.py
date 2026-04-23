@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import logging
 from typing import Generator, Optional
+import mlx.core as mx
+from mlx_lm import stream_generate
+from mlx_lm.sample_utils import make_sampler, make_logits_processors  # ✅ Plural!
 
 from therapy_ai.core.model_manager import ModelManager, LoadedModel
 from therapy_ai.core.backend import HardwareBackend
@@ -118,39 +121,42 @@ class InferenceEngine:
             return "\n".join(lines)
 
     # ── Backend-specific streaming ────────────────────────────────────────────
-
-    def _stream_mlx(
-        self,
-        prompt: str,
-        loaded: LoadedModel,
-    ) -> Generator[str, None, GenerationResult]:
-        """MLX streaming via mlx_lm.generate or mlx_tune."""
-        from mlx_lm import stream_generate
-
+    
+    def _stream_mlx(self, prompt: str, loaded: LoadedModel) -> Generator[str, None, GenerationResult]:
+        
+        
         cfg = loaded.config
         collected: list[str] = []
         prompt_toks = len(loaded.tokenizer.encode(prompt))
+
+        mx.metal.clear_cache()  # Metal reset
+
+        sampler = make_sampler(temp=cfg.temperature, top_p=cfg.top_p)
+        logits_processors = make_logits_processors(  # ✅ Already list!
+            repetition_penalty=cfg.repetition_penalty,
+            repetition_context_size=1024
+        )
 
         for response in stream_generate(
             loaded.model,
             loaded.tokenizer,
             prompt=prompt,
             max_tokens=cfg.max_new_tokens,
-            temp=cfg.temperature,
-            top_p=cfg.top_p,
-            repetition_penalty=cfg.repetition_penalty,
+            sampler=sampler,
+            logits_processors=logits_processors,  # ✅ No extra []
         ):
-            token_text: str = response.text if hasattr(response, "text") else response
+            token_text = getattr(response, 'text', str(response))
             collected.append(token_text)
             yield token_text
 
+        mx.metal.clear_cache()  # Cleanup
         full_text = "".join(collected)
         return GenerationResult(
-            text=full_text,
-            prompt_tokens=prompt_toks,
-            completion_tokens=len(collected),
-            stopped_by="eos",
+            text=full_text, prompt_tokens=prompt_toks,
+            completion_tokens=len(collected), stopped_by="eos"
         )
+
+    
 
     def _stream_llamacpp(
         self,
