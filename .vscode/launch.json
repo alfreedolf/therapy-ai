@@ -1,5 +1,5 @@
 {
-    "version": "0.2.1",
+    "version": "0.2.0",
     "configurations": [
         {
             "name": "Python: Main",
@@ -7,6 +7,20 @@
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Python: UI App (.therapy-ai)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": ["ui"],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            },
+            "cwd": "${workspaceFolder}"
+            // "python": "/path/to/miniconda3/envs/.therapy-ai/bin/python"  // Uncomment & set full path to env's python if auto-select fails
         }
     ]
 }
