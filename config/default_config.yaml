@@ -60,3 +60,24 @@ ui:
 logging:
   level: "INFO"             # DEBUG | INFO | WARNING | ERROR
   log_file: "data/therapy_ai.log"
+
+
+session_closing:
+  # ── Automatic closing-ritual trigger ─────────────────────────────────────
+  #
+  # The model is nudged into closing mode when the session reaches
+  # `auto_close_after_turns` user turns. A [CLOSING_MODE] marker is injected
+  # into the context so the model follows the SESSION CLOSING protocol defined
+  # in system_prompt.txt.
+  #
+  # Set auto_close_after_turns to 0 to disable automatic triggering entirely
+  # (the user can still trigger closing manually via the "Wrap up" button).
+  auto_close_after_turns: 20     # ~40–50 min at typical conversation pace
+
+  # How many turns before the threshold to show the "Wrap up session" button.
+  # e.g. with threshold=20 and warn_before=3, button appears at turn 17.
+  warn_before_turns: 3
+
+  # Whether to allow the user to manually trigger closing at any time via
+  # a sidebar button, regardless of turn count.
+  allow_manual_trigger: true
