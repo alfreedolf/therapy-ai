@@ -83,10 +83,14 @@ def _render_passphrase_gate() -> None:
 
 def _bootstrap(passphrase: str) -> None:
     """Initialise all services after passphrase entry."""
+    import yaml
+    cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    locale = cfg.get("ui", {}).get("locale", "EN")
+
     store   = SessionStore(passphrase=passphrase)
     manager = ModelManager.from_config(CONFIG_PATH)
     engine  = InferenceEngine(manager)
-    safety  = SafetyGuard(locale="DE")
+    safety  = SafetyGuard(locale=locale)
     builder = ContextBuilder(store)
 
     st.session_state.update({

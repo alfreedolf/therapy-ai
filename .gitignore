@@ -1,6 +1,16 @@
  # ── Project / data artefacts ──────────────────────────────────────────────────
-data/
+# Ignore all personal data but keep the directory scaffold so a fresh clone
+# has the empty data/ tree the app expects.
+data/*
 !data/.gitkeep
+!data/finetune/
+!data/finetune/.gitkeep
+!data/adapters/
+!data/adapters/.gitkeep
+data/finetune/*
+!data/finetune/.gitkeep
+data/adapters/*
+!data/adapters/.gitkeep
 
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
@@ -13,6 +23,10 @@ dist/
 build/
 *.egg
 .eggs/
+
+# ── Type checking / linting caches ───────────────────────────────────────────
+.mypy_cache/
+.ruff_cache/
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 .venv/

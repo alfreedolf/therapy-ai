@@ -52,7 +52,7 @@ storage:
 
 
 ui:
-  locale: "DE"              # Used for localised emergency resources
+  locale: "EN"              # Used for localised emergency resources — change to your country code (e.g. DE, IT, FR)
   theme: "calm"             # calm | dark | light (future use)
   show_token_count: false
 
