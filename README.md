@@ -12,6 +12,66 @@ and encrypted on your local hardware — no data ever leaves your device.
 > helpline immediately. See [findahelpline.com](https://findahelpline.com) for
 > resources in your country.
 
+## At a glance
+
+| | |
+|---|---|
+| **Problem** | Journalling and reflective mental-health support tools typically send deeply personal data to the cloud. This explores whether a useful, safety-aware reflective companion can run **entirely on local hardware** with no data egress. |
+| **Maturity** | Research / portfolio **prototype**. Not production, not clinically validated. |
+| **LLM** | Local open-weight instruct models (Llama 3.1 8B, Qwen2.5 7B/14B, Gemma 2). Swappable from the UI — no code change. **No external API; no OpenAI/Anthropic calls.** |
+| **Inference** | Hardware-abstracted: **MLX** on Apple Silicon, **CUDA** (Unsloth/Transformers) on NVIDIA, CPU fallback. One `BackendFactory` picks the path at runtime. |
+| **Retrieval** | Local semantic memory via **`sqlite-vec`** + **`all-MiniLM-L6-v2`** embeddings (384-dim), stored in the same encrypted SQLite DB. No external vector store. |
+| **Memory** | Two layers — a keyword/theme preamble from recent sessions, plus semantic retrieval of the most relevant past sessions for the current message. Sliding-window truncation on current-session history. |
+| **Safety** | Pre-LLM screening (crisis / prompt-injection / hard-block) with locale-aware crisis resources; post-LLM output token scrubbing; an automatic, clinically-modelled session-closing ritual. |
+| **Evaluation** | A composite GRPO reward signal (user rating 60% + empathy markers + response structure + safety penalty) for optional local LoRA fine-tuning on your own rated sessions. |
+| **Privacy** | AES-256-GCM at rest, PBKDF2-SHA256 (480k iters) key derived in-memory from a passphrase that is never stored. Zero telemetry. |
+| **Tests** | `pytest` suite structured into unit / component / e2e layers covering safety screening, encryption isolation, and the session-closing logic. |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[User] --> UI[Streamlit UI<br/>chat · progress · settings]
+    UI --> SG[SafetyGuard<br/>crisis / injection / block screen]
+    SG -->|blocked / crisis| CR[Crisis resources<br/>no model call]
+    SG -->|safe| CB[ContextBuilder]
+
+    subgraph MEM [Local encrypted memory]
+        SS[(SQLite<br/>AES-256-GCM)]
+        VEC[(sqlite-vec<br/>MiniLM embeddings)]
+    end
+
+    CB --> SS
+    CB --> VEC
+    CB --> ENG[InferenceEngine<br/>streaming]
+
+    ENG --> BF{BackendFactory}
+    BF -->|Apple Silicon| MLX[MLX]
+    BF -->|NVIDIA| CUDA[CUDA / Unsloth]
+    BF -->|fallback| CPU[CPU / Transformers]
+
+    MLX --> OUT[Token stream]
+    CUDA --> OUT
+    CPU --> OUT
+    OUT --> SGO[Output scrub] --> UI
+
+    UI -.rated sessions.-> EXP[JSONL export] -.-> FT[LoRA SFT / GRPO<br/>reward: rating+empathy+structure+safety]
+    FT -.adapter.-> ENG
+```
+
+**Flow:** every message is screened *before* it can reach the model. Safe input is enriched with cross-session memory (keyword preamble + semantic retrieval from the local vector index), streamed through whichever backend the hardware supports, and scrubbed on the way out. Rated sessions can be exported to fine-tune a local LoRA adapter against a composite quality reward — all offline.
+
+### Limitations
+- Not clinically validated; no guarantee of therapeutic quality or correctness.
+- Safety screening is regex-based — it catches common phrasings but has known gaps (documented as `xfail` tests) and is not a substitute for human oversight.
+- Evaluation is a heuristic reward proxy, not a validated outcome measure.
+- Single-user, local-only by design; no multi-user, auth, or hosting story.
+- Small quantised models can hallucinate or give shallow responses.
+
+---
+
+## Run it locally
+
 ```bash
 # One-time setup
 uv sync --extra mac --extra dev      # or --extra cuda on NVIDIA
@@ -19,7 +79,7 @@ uv sync --extra mac --extra dev      # or --extra cuda on NVIDIA
 # Run
 uv run python main.py ui
 ```
-Then open http://localhost:8501.
+Then open http://localhost:8501. Full setup details below.
 
 ---
 
