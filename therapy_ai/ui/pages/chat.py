@@ -16,29 +16,22 @@ The user can also trigger closing manually at any time via the sidebar button.
 
 from __future__ import annotations
 
-import yaml
 import streamlit as st
 from pathlib import Path
-from typing import Optional
 
 from therapy_ai.core.safety import SafetyLevel
 from therapy_ai.domain import Message
 from therapy_ai.memory.session_store import SessionStore
 from therapy_ai.core.model_manager import ModelManager
 from therapy_ai.core.inference import InferenceEngine
+from therapy_ai.ui.closing import (
+    ClosingConfig,
+    inject_closing_marker,
+    should_auto_close,
+    should_show_wrapup_button,
+)
 
 CONFIG_PATH = Path("config/default_config.yaml")
-
-# ── Config helpers ────────────────────────────────────────────────────────────
-
-def _load_closing_config() -> dict:
-    cfg = yaml.safe_load(CONFIG_PATH.read_text())
-    defaults = {
-        "auto_close_after_turns": 20,
-        "warn_before_turns": 3,
-        "allow_manual_trigger": True,
-    }
-    return {**defaults, **cfg.get("session_closing", {})}
 
 
 # ── Cached engine (loads model once, survives Streamlit reruns) ───────────────
@@ -67,7 +60,7 @@ def _ensure_state() -> None:
 
 def render() -> None:
     _ensure_state()
-    closing_cfg = _load_closing_config()
+    closing_cfg = ClosingConfig.from_yaml(CONFIG_PATH)
 
     store:   SessionStore  = st.session_state.store
     engine:  InferenceEngine = st.session_state.engine
@@ -85,11 +78,8 @@ def render() -> None:
     turn_count   = st.session_state.turn_count
     closing_mode = st.session_state.closing_mode
 
-    auto_threshold = closing_cfg["auto_close_after_turns"]
-    warn_threshold = auto_threshold - closing_cfg["warn_before_turns"]
-
     # Auto-trigger closing mode when threshold is reached
-    if auto_threshold > 0 and turn_count >= auto_threshold and not closing_mode:
+    if should_auto_close(turn_count, closing_cfg) and not closing_mode:
         st.session_state.closing_mode = True
         closing_mode = True
 
@@ -104,12 +94,10 @@ def render() -> None:
     # ── Sidebar: wrap-up controls ─────────────────────────────────────────────
     with st.sidebar:
         st.divider()
-        if closing_cfg["allow_manual_trigger"] and not closing_mode:
-            # Show "Wrap up" button from warn_threshold onwards, or always
-            if turn_count >= warn_threshold or warn_threshold <= 0:
-                if st.button("🌿 Wrap up session", use_container_width=True):
-                    st.session_state.closing_mode = True
-                    st.rerun()
+        if should_show_wrapup_button(turn_count, closing_cfg, closing_mode):
+            if st.button("🌿 Wrap up session", use_container_width=True):
+                st.session_state.closing_mode = True
+                st.rerun()
 
         if closing_mode:
             st.caption("✦ Closing ritual in progress")
@@ -159,7 +147,7 @@ def render() -> None:
         # Build context, injecting [CLOSING_MODE] when active
         context = builder.build(session_id, latest_user_text=user_input)
         if closing_mode:
-            context = _inject_closing_marker(context)
+            context = inject_closing_marker(context)
         context.append(Message(role="user", content=user_input))
 
         # Stream response
@@ -199,7 +187,7 @@ def render() -> None:
 
 # ── Sub-renders ───────────────────────────────────────────────────────────────
 
-def _render_start_ui(store: SessionStore, closing_cfg: dict) -> None:
+def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
     st.markdown("### How are you feeling right now?")
     mood = st.slider("Mood (1 = very low, 10 = great)", 1, 10, 5)
 
@@ -215,7 +203,7 @@ def _render_start_ui(store: SessionStore, closing_cfg: dict) -> None:
         st.info("🔒 This session is encrypted locally. Nothing leaves your device.")
 
     # Show configured session length as a friendly hint
-    threshold = closing_cfg.get("auto_close_after_turns", 0)
+    threshold = closing_cfg.auto_close_after_turns
     if threshold > 0:
         st.caption(
             f"Sessions gently guide towards a close after around {threshold} exchanges."
@@ -244,25 +232,6 @@ def _render_end_ui(store: SessionStore, session_id: str) -> None:
         st.session_state.closing_mode = False
         st.success("Session saved. Take care of yourself 🌱")
         st.rerun()
-
-
-def _inject_closing_marker(context: list[Message]) -> list[Message]:
-    """
-    Insert a system-role [CLOSING_MODE] marker just before the final user turn.
-    This is invisible to the user but tells the model to follow the SESSION
-    CLOSING protocol defined in system_prompt.txt.
-    """
-    marker = Message(
-        role="system",
-        content=(
-            "[CLOSING_MODE] The session is now in its closing phase. "
-            "Follow the SESSION CLOSING protocol: gently signal the end, "
-            "summarise what was explored, name one insight, offer a "
-            "between-session anchor, and close with warmth. "
-            "Do not open any new emotional topics."
-        ),
-    )
-    return context + [marker]
 
 
 def _render_crisis_banner(message: str) -> None:
