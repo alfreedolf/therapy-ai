@@ -1,7 +1,16 @@
-# Therapy AI — Local Privacy-Preserving Psychotherapy System
+# Therapy AI — Local Privacy-Preserving Support Companion
 
-A fully offline, encrypted AI-powered therapy assistant that runs on your local hardware.
-No data ever leaves your device.
+A safety-conscious conversational AI prototype exploring memory, retrieval, model
+orchestration, and evaluation for mental-health support workflows. Runs fully offline
+and encrypted on your local hardware — no data ever leaves your device.
+
+> [!IMPORTANT]
+> **This is a research prototype, not a medical device.** It is not a substitute for
+> professional mental-health care, diagnosis, or treatment, and it has not been
+> clinically validated. It cannot handle emergencies. If you are in crisis or may be a
+> danger to yourself or others, contact your local emergency services or a crisis
+> helpline immediately. See [findahelpline.com](https://findahelpline.com) for
+> resources in your country.
 
 ```bash
 # One-time setup
