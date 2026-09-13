@@ -17,7 +17,7 @@ and encrypted on your local hardware — no data ever leaves your device.
 | | |
 |---|---|
 | **Problem** | Journalling and reflective mental-health support tools typically send deeply personal data to the cloud. This explores whether a useful, safety-aware reflective companion can run **entirely on local hardware** with no data egress. |
-| **Maturity** | Research / portfolio **prototype**. Not production, not clinically validated. |
+| **Maturity** | Working **prototype** — functional end to end, but experimental and not clinically validated or production-hardened. |
 | **LLM** | Local open-weight instruct models (Llama 3.1 8B, Qwen2.5 7B/14B, Gemma 2). Swappable from the UI — no code change. **No external API; no OpenAI/Anthropic calls.** |
 | **Inference** | Hardware-abstracted: **MLX** on Apple Silicon, **CUDA** (Unsloth/Transformers) on NVIDIA, CPU fallback. One `BackendFactory` picks the path at runtime. |
 | **Retrieval** | Local semantic memory via **`sqlite-vec`** + **`all-MiniLM-L6-v2`** embeddings (384-dim), stored in the same encrypted SQLite DB. No external vector store. |
