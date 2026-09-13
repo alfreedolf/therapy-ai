@@ -37,6 +37,7 @@ dependencies = [
 mac = [
     "mlx>=0.15",
     "mlx-lm>=0.15",
+    "mlx-tune",                                 # git dep — source declared in [tool.uv.sources]
     "torch>=2.3.0; platform_system=='Darwin'",  # CPU-only PyTorch for Mac deps
     "torchvision>=0.18.0; platform_system=='Darwin'",  # Resolves transitive deps
     "llama-cpp-python>=0.2.90",
@@ -80,7 +81,7 @@ include = ["therapy_ai*"]
 # ── Ruff (linter / formatter) ─────────────────────────────────────────────────
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -91,7 +92,7 @@ quote-style = "double"
 
 # ── Mypy ──────────────────────────────────────────────────────────────────────
 [tool.mypy]
-python_version = "3.13.5"
+python_version = "3.11"
 strict = false
 ignore_missing_imports = true
 
@@ -99,3 +100,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --cov=therapy_ai --cov-report=term-missing"
+
+# ── uv ────────────────────────────────────────────────────────────────────────
+# mlx-tune is not on PyPI — declare it here so `uv sync` fetches it from git.
+# Only relevant for Apple Silicon (mac extra); uv skips it gracefully on other
+# platforms when the mac extra is not requested.
+[tool.uv.sources]
+mlx-tune = { git = "https://github.com/ARahim3/mlx-tune.git" }

@@ -6,10 +6,11 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "python": "${workspaceFolder}/.venv/bin/python"
         },
         {
-            "name": "Python: UI App (.therapy-ai)",
+            "name": "Python: UI",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -19,8 +20,8 @@
             "env": {
                 "PYTHONUNBUFFERED": "1"
             },
-            "cwd": "${workspaceFolder}"
-            // "python": "/path/to/miniconda3/envs/.therapy-ai/bin/python"  // Uncomment & set full path to env's python if auto-select fails
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python"
         }
     ]
 }

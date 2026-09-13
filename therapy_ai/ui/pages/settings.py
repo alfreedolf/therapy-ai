@@ -9,16 +9,42 @@ from __future__ import annotations
 import streamlit as st
 from pathlib import Path
 
-from therapy_ai.core.backend import BackendFactory
+from therapy_ai.core.backend import BackendFactory, HardwareBackend
 from therapy_ai.core.model_manager import ModelConfig
 
 
-PRESET_MODELS = {
-    "Qwen3 8B Q4 (recommended)":  "Qwen/Qwen3-8B-Instruct-GGUF",
-    "Gemma 3 4B Q4 (lightweight)": "google/gemma-3-4b-it-GGUF",
-    "Llama 3.2 3B Q4 (fast)":      "meta-llama/Llama-3.2-3B-Instruct-GGUF",
-    "Custom (enter manually)":     "__custom__",
+# ── Backend-appropriate model presets ─────────────────────────────────────────
+# Keys are display labels; values are HuggingFace model IDs.
+# MLX models only run on Apple Silicon; CUDA/CPU use standard HF repos.
+
+_PRESETS_MLX = {
+    "Llama 3.1 8B 4-bit · MLX (recommended for M4 16 GB)": "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit",
+    "Qwen2.5 7B 4-bit · MLX (fast, M4 8 GB+)":             "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "Qwen2.5 14B 4-bit · MLX (M4 24 GB+)":                 "mlx-community/Qwen2.5-14B-Instruct-4bit",
+    "Custom (enter manually)":                              "__custom__",
 }
+
+_PRESETS_CUDA = {
+    "Qwen2.5 7B · CUDA (RTX 4060 8 GB+, recommended)":     "Qwen/Qwen2.5-7B-Instruct",
+    "Llama 3.1 8B · CUDA (RTX 4060 Ti 16 GB+)":            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+    "Gemma 2 2B · CUDA (low VRAM, <6 GB)":                 "google/gemma-2-2b-it",
+    "Custom (enter manually)":                              "__custom__",
+}
+
+_PRESETS_CPU = {
+    "Qwen2.5 7B · CPU (slow, no GPU required)":            "Qwen/Qwen2.5-7B-Instruct",
+    "Gemma 2 2B · CPU (lighter, no GPU required)":         "google/gemma-2-2b-it",
+    "Custom (enter manually)":                             "__custom__",
+}
+
+
+def _presets_for_backend(backend: HardwareBackend) -> dict[str, str]:
+    if backend == HardwareBackend.MLX:
+        return _PRESETS_MLX
+    elif backend == HardwareBackend.CUDA:
+        return _PRESETS_CUDA
+    else:
+        return _PRESETS_CPU
 
 
 def render() -> None:
@@ -37,8 +63,11 @@ def render() -> None:
 
     # ── Model selection ───────────────────────────────────────────────────────
     with st.expander("🤖 Model"):
-        selected_label = st.selectbox("Select model preset", list(PRESET_MODELS.keys()))
-        model_id = PRESET_MODELS[selected_label]
+        info = BackendFactory.detect()
+        presets = _presets_for_backend(info.backend)
+
+        selected_label = st.selectbox("Select model preset", list(presets.keys()))
+        model_id = presets[selected_label]
 
         if model_id == "__custom__":
             model_id = st.text_input(
@@ -46,10 +75,18 @@ def render() -> None:
                 placeholder="org/model-name",
             )
 
+        quant_options = (
+            ["4bit", "8bit", "none"]
+            if info.backend == HardwareBackend.MLX
+            else ["q4_k_m", "q8_0", "f16", "none"]
+        )
         quant = st.selectbox(
             "Quantisation",
-            ["q4_k_m", "q8_0", "f16", "none"],
-            help="q4_k_m is the best balance of quality and speed for M4/RTX4060.",
+            quant_options,
+            help=(
+                "4bit = best quality/speed on Apple Silicon. "
+                "q4_k_m = best for CUDA/CPU via llama.cpp."
+            ),
         )
 
         if st.button("Apply Model", type="primary", disabled=not model_id):

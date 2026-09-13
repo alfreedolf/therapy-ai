@@ -7,11 +7,16 @@
 
 model:
   # ── Model selection ──────────────────────────────────────────────────────
-  # Recommended: Qwen3 8B Q4_K_M (best quality/speed on M4 16GB+)
-  # Lightweight: google/gemma-3-4b-it   (M4 8GB, RTX 4060 8GB VRAM)
-  model_id: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"  # ~5GB, top choice for empathy/reflection [web:63]
-  # Alternative 7B: "mlx-community/Qwen2.5-7B-Instruct-4bit"  # Faster on M4 [web:67]
-  # Alternative: "mlx-community/Mistral-Nemo-Instruct-2407-12B-4bit"  # If 12B fits
+  # Mac (MLX): mlx-community models are quantised for Apple Silicon only.
+  # NVIDIA / CPU: use a standard HuggingFace model ID instead (see below).
+  #
+  # Mac (M4 16 GB, default):
+  model_id: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"
+  # Mac alternative:      "mlx-community/Qwen2.5-7B-Instruct-4bit"
+  #
+  # NVIDIA / CPU — uncomment one of these and set quantization: "q4_k_m":
+  # model_id: "Qwen/Qwen2.5-7B-Instruct"
+  # model_id: "meta-llama/Meta-Llama-3.1-8B-Instruct"   # requires HF token
 
   # Quantisation: q4_k_m | q8_0 | f16 | none
   # q4_k_m = ~5 GB on disk, best quality-per-byte
