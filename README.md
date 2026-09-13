@@ -3,6 +3,15 @@
 A fully offline, encrypted AI-powered therapy assistant that runs on your local hardware.
 No data ever leaves your device.
 
+```bash
+# One-time setup
+uv sync --extra mac --extra dev      # or --extra cuda on NVIDIA
+
+# Run
+uv run python main.py ui
+```
+Then open http://localhost:8501.
+
 ---
 
 ## Quick Start
@@ -101,12 +110,14 @@ therapy-ai/
 
 ## Switching Models
 
-Edit `config/default_config.yaml`:
+The Settings page in the UI shows model presets tailored to your hardware automatically — you don't need to edit any files. Open Settings → Model, pick a preset, and click Apply.
+
+If you prefer to set a default before first launch, edit `config/default_config.yaml`:
 ```yaml
 model:
-  model_id: "Qwen/Qwen3-8B-Instruct"   # change this line only
+  model_id: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"  # Mac
+  # model_id: "Qwen/Qwen2.5-7B-Instruct"                      # NVIDIA / CPU
 ```
-Or use the Settings page in the UI — no code changes needed.
 
 ### Recommended models by hardware
 
