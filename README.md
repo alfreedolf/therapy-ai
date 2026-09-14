@@ -269,3 +269,22 @@ uv run pytest
    ```
 3. Update `config/default_config.yaml` — switch `model_id` to a standard HuggingFace model if moving away from Mac (mlx-community models only run on Apple Silicon). See the comments in that file.
 4. `BackendFactory.detect()` auto-resolves the new backend. No code changes needed.
+
+---
+
+## License
+
+Copyright (C) 2026 Alfonso Ridolfo ([alfreedolf](https://github.com/alfreedolf))
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the **GNU Affero General Public License** as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+
+It is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the [GNU AGPL](https://www.gnu.org/licenses/agpl-3.0.html) for details,
+or the [`LICENSE`](./LICENSE) file in this repository.
+
+The AGPL is a strong copyleft license: if you modify this software and make it
+available to others over a network (for example, as a hosted service), you must also
+make your modified source code available to those users under the same license.
