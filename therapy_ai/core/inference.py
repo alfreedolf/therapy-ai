@@ -10,9 +10,19 @@ from __future__ import annotations
 
 import logging
 from typing import Generator, Optional
-import mlx.core as mx
-from mlx_lm import stream_generate
-from mlx_lm.sample_utils import make_sampler, make_logits_processors  # ✅ Plural!
+import platform
+
+IS_APPLE = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+if IS_APPLE:
+    import mlx.core as mx
+    from mlx_lm import stream_generate
+    from mlx_lm.sample_utils import make_sampler, make_logits_processors
+else:
+    mx = None
+    stream_generate = None
+    make_sampler = None
+    make_logits_processors = None
 
 from therapy_ai.core.model_manager import ModelManager, LoadedModel
 from therapy_ai.core.backend import HardwareBackend
