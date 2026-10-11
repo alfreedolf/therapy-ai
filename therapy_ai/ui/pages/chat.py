@@ -8,13 +8,13 @@ Handles session lifecycle, streaming generation, safety routing.
 from __future__ import annotations
 
 import streamlit as st
-from typing import Optional
 
+from therapy_ai.core.inference import InferenceEngine
+from therapy_ai.core.model_manager import ModelManager
 from therapy_ai.core.safety import SafetyLevel
 from therapy_ai.domain import Message
 from therapy_ai.memory.session_store import SessionStore
-from therapy_ai.core.model_manager import ModelManager
-from therapy_ai.core.inference import InferenceEngine
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ✅ GLOBAL CACHED ENGINE — LOADS MODEL ONCE, SURVIVES RERUNS
@@ -47,9 +47,18 @@ def render() -> None:
         return
 
     session_id = st.session_state.current_session
+    vault_pass = st.session_state.get("vault_passphrase")
+
+    # ── Vault unlock gate ─────────────────────────────────────────────────────
+    # If this session is a vault and we don't hold a valid passphrase in memory,
+    # prompt to unlock before anything is loaded or sent.
+    if store.is_vault(session_id):
+        if not vault_pass or not store.verify_vault_passphrase(session_id, vault_pass):
+            _render_vault_unlock_ui(store, session_id)
+            return
 
     # ── Render chat history ───────────────────────────────────────────────────
-    messages = store.load_messages(session_id)
+    messages = store.load_messages(session_id, vault_passphrase=vault_pass)
     for msg in messages:
         with st.chat_message(msg.role):
             st.markdown(msg.content)
@@ -71,13 +80,16 @@ def render() -> None:
 
         if safety_result.level == SafetyLevel.CRISIS:
             _render_crisis_banner(safety_result.message)
-            store.add_message(session_id, "user", user_input, is_flagged=True)
+            store.add_message(
+                session_id, "user", user_input, is_flagged=True,
+                vault_passphrase=vault_pass,
+            )
             with st.chat_message("user"):
                 st.markdown(user_input)
             return
 
         # Normal path
-        store.add_message(session_id, "user", user_input)
+        store.add_message(session_id, "user", user_input, vault_passphrase=vault_pass)
         with st.chat_message("user"):
             st.markdown(user_input)
 
@@ -107,7 +119,8 @@ def render() -> None:
 
         store.add_message(
             session_id, "assistant", response_text,
-            tokens=result.completion_tokens if result else None
+            tokens=result.completion_tokens if result else None,
+            vault_passphrase=vault_pass,
         )
         st.rerun()
 
@@ -123,11 +136,43 @@ def _start_session_ui(store: SessionStore) -> None:
     st.markdown("### How are you feeling right now?")
     mood = st.slider("Mood (1 = very low, 10 = great)", 1, 10, 5)
 
+    # ── Vault lock (optional) ─────────────────────────────────────────────────
+    lock_vault = st.checkbox(
+        "🔒 Lock this session (vault)",
+        help=(
+            "Encrypt this session with its own passphrase, separate from your "
+            "app passphrase. No one — not even someone who knows your app "
+            "passphrase — can read it without the vault passphrase."
+        ),
+    )
+    vault_passphrase: str | None = None
+    if lock_vault:
+        vault_passphrase = st.text_input(
+            "Vault passphrase",
+            type="password",
+            help="You will need this exact passphrase to reopen the session.",
+        )
+        st.warning(
+            "⚠️ There is no recovery. If you forget this passphrase, the "
+            "session is permanently unreadable."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Start Session 🌿", use_container_width=True, type="primary"):
-            sid = store.create_session(mood_before=mood)
+        start_disabled = lock_vault and not vault_passphrase
+        if st.button(
+            "Start Session 🌿",
+            use_container_width=True,
+            type="primary",
+            disabled=start_disabled,
+        ):
+            sid = store.create_session(
+                mood_before=mood,
+                vault_passphrase=vault_passphrase if lock_vault else None,
+            )
             st.session_state.current_session = sid
+            # Hold the vault passphrase in memory for THIS session only.
+            st.session_state.vault_passphrase = vault_passphrase if lock_vault else None
             st.rerun()
 
     with col2:
@@ -142,8 +187,33 @@ def _end_session_ui(store: SessionStore, session_id: str) -> None:
     if st.button("Save & Close", type="primary"):
         store.close_session(session_id, mood_after=mood_after, rating=rating, note=note or None)
         st.session_state.current_session = None
+        # Drop the vault passphrase from memory when leaving the session.
+        st.session_state.vault_passphrase = None
         st.success("Session saved. Take care of yourself 🌱")
         st.rerun()
+
+
+def _render_vault_unlock_ui(store: SessionStore, session_id: str) -> None:
+    """Prompt for a vault session's passphrase before its content is shown."""
+    st.markdown("### 🔒 This session is locked")
+    st.caption(
+        "Enter the vault passphrase you set when you created this session. "
+        "There is no recovery if it is lost."
+    )
+    attempt = st.text_input("Vault passphrase", type="password", key="vault_unlock_input")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Unlock", type="primary", use_container_width=True):
+            if store.verify_vault_passphrase(session_id, attempt):
+                st.session_state.vault_passphrase = attempt
+                st.rerun()
+            else:
+                st.error("Incorrect vault passphrase.")
+    with col2:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.current_session = None
+            st.session_state.vault_passphrase = None
+            st.rerun()
 
 def _render_crisis_banner(message: str) -> None:
     st.error("🚨 **I'm concerned about what you've shared.**")
