@@ -8,25 +8,20 @@ derived from a user-controlled passphrase via PBKDF2.
 
 from __future__ import annotations
 
-import json
-import os
-import logging
-import hashlib
 import base64
-from datetime import datetime, timezone
+import json
+import logging
+import os
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
-from dataclasses import dataclass, field, asdict
 
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import (
-    create_engine, Column, String, Text, Integer,
-    Float, DateTime, Boolean, event
-)
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-from therapy_ai.domain import TherapySession, Message
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine, event
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+from therapy_ai.domain import Message, TherapySession
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +43,16 @@ class SessionRecord(Base):
     themes_enc  = Column(Text, nullable=True)       # encrypted JSON list
     note_enc    = Column(Text, nullable=True)       # encrypted free-text note
 
+    # ── Vault mode ────────────────────────────────────────────────────────────
+    # A vault session is locked with its OWN passphrase, independent of the app
+    # passphrase. Its messages/notes are encrypted with a key derived from the
+    # vault passphrase + a per-session random salt (stored here, NOT in the
+    # shared data/.salt). Someone who knows the app passphrase still cannot read
+    # a vault session without its vault passphrase.
+    is_vault       = Column(Boolean, default=False, nullable=False)
+    vault_salt     = Column(Text, nullable=True)   # b64 per-session random salt
+    vault_verifier = Column(Text, nullable=True)   # known token enc. w/ vault key
+
 
 class MessageRecord(Base):
     """One turn (user or assistant) inside a session."""
@@ -67,23 +72,44 @@ class MessageRecord(Base):
 
 class Encryptor:
     """
-    AES-256-GCM encryption with PBKDF2-derived key.
+    AES-256-GCM encryption with a PBKDF2-SHA256-derived key.
     The passphrase never leaves memory; the key is re-derived on each app start.
+
+    Two construction modes:
+      * default  — key derived from the shared app salt file (data/.salt).
+                   Used for ordinary (non-vault) sessions.
+      * explicit — key derived from a caller-supplied salt. Used for vault
+                   sessions, where each session has its own random salt stored
+                   in the DB row (never in the shared salt file).
     """
 
     SALT_FILE = "data/.salt"
     ITERATIONS = 480_000  # OWASP 2024 recommended minimum for PBKDF2-SHA256
 
-    def __init__(self, passphrase: str):
-        salt = self._get_or_create_salt()
+    def __init__(self, passphrase: str, salt: bytes | None = None):
+        if salt is None:
+            salt = self._get_or_create_salt()
+        self._aesgcm = AESGCM(self._derive_key(passphrase, salt))
+
+    @classmethod
+    def _derive_key(cls, passphrase: str, salt: bytes) -> bytes:
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            iterations=self.ITERATIONS,
+            iterations=cls.ITERATIONS,
         )
-        self._key = kdf.derive(passphrase.encode("utf-8"))
-        self._aesgcm = AESGCM(self._key)
+        return kdf.derive(passphrase.encode("utf-8"))
+
+    @classmethod
+    def for_vault(cls, passphrase: str, salt: bytes) -> Encryptor:
+        """Build an encryptor for a vault session from its own salt."""
+        return cls(passphrase, salt=salt)
+
+    @staticmethod
+    def new_salt() -> bytes:
+        """A fresh 16-byte random salt (for a new vault session)."""
+        return os.urandom(16)
 
     def encrypt(self, plaintext: str) -> str:
         nonce = os.urandom(12)
@@ -124,6 +150,10 @@ class SessionStore:
 
     DEFAULT_DB_PATH = "data/sessions.db"
 
+    # Known plaintext encrypted with the vault key so we can verify a vault
+    # passphrase without ever storing the passphrase itself.
+    _VAULT_VERIFIER_PLAINTEXT = "therapy-ai-vault-ok"
+
     def __init__(self, passphrase: str, db_path: str | Path = DEFAULT_DB_PATH):
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,33 +175,110 @@ class SessionStore:
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
-    def create_session(self, mood_before: Optional[int] = None) -> str:
+    def create_session(
+        self,
+        mood_before: int | None = None,
+        vault_passphrase: str | None = None,
+    ) -> str:
+        """
+        Create a session. If `vault_passphrase` is given, the session is a
+        VAULT: a per-session random salt is generated, a verifier token is
+        stored (encrypted with the vault key), and all its messages/notes are
+        encrypted with the vault key instead of the app key.
+        """
         import uuid
         sid = str(uuid.uuid4())
+        is_vault = vault_passphrase is not None
+        vault_salt_b64 = None
+        vault_verifier = None
+
+        if is_vault:
+            if not vault_passphrase:
+                raise ValueError("Vault passphrase must be non-empty.")
+            salt = Encryptor.new_salt()
+            venc = Encryptor.for_vault(vault_passphrase, salt)
+            vault_salt_b64 = base64.b64encode(salt).decode("utf-8")
+            vault_verifier = venc.encrypt(self._VAULT_VERIFIER_PLAINTEXT)
+
         with self._Session() as db:
             rec = SessionRecord(
                 id=sid,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
                 mood_before=mood_before,
+                is_vault=is_vault,
+                vault_salt=vault_salt_b64,
+                vault_verifier=vault_verifier,
             )
             db.add(rec)
             db.commit()
-        logger.debug("Session created: %s", sid)
+        logger.debug("Session created: %s (vault=%s)", sid, is_vault)
         return sid
+
+    # ── Vault helpers ──────────────────────────────────────────────────────────
+
+    def is_vault(self, session_id: str) -> bool:
+        with self._Session() as db:
+            rec = db.get(SessionRecord, session_id)
+            if rec is None:
+                raise ValueError(f"Session not found: {session_id}")
+            return bool(rec.is_vault)
+
+    def verify_vault_passphrase(self, session_id: str, vault_passphrase: str) -> bool:
+        """
+        True if `vault_passphrase` can decrypt the session's verifier token.
+        Returns False for a wrong passphrase (never raises on mismatch).
+        """
+        with self._Session() as db:
+            rec = db.get(SessionRecord, session_id)
+            if rec is None:
+                raise ValueError(f"Session not found: {session_id}")
+            if not rec.is_vault:
+                raise ValueError(f"Session {session_id} is not a vault.")
+            try:
+                venc = self._vault_encryptor(rec, vault_passphrase)
+                return venc.decrypt(rec.vault_verifier) == self._VAULT_VERIFIER_PLAINTEXT
+            except Exception:
+                return False
+
+    def _vault_encryptor(self, rec: SessionRecord, vault_passphrase: str) -> Encryptor:
+        salt = base64.b64decode(rec.vault_salt)
+        return Encryptor.for_vault(vault_passphrase, salt)
+
+    def _encryptor_for(
+        self, rec: SessionRecord, vault_passphrase: str | None
+    ) -> Encryptor:
+        """
+        Pick the correct encryptor for a session: the vault key for a vault
+        session (requires a verified passphrase), else the app key.
+        """
+        if not rec.is_vault:
+            return self._enc
+        if vault_passphrase is None:
+            raise PermissionError(
+                "This session is a vault; a vault passphrase is required."
+            )
+        venc = self._vault_encryptor(rec, vault_passphrase)
+        try:
+            ok = venc.decrypt(rec.vault_verifier) == self._VAULT_VERIFIER_PLAINTEXT
+        except Exception:
+            ok = False
+        if not ok:
+            raise PermissionError("Incorrect vault passphrase.")
+        return venc
 
     def close_session(
         self,
         session_id: str,
-        mood_after: Optional[int] = None,
-        rating: Optional[int] = None,
-        themes: Optional[list[str]] = None,
-        note: Optional[str] = None,
+        mood_after: int | None = None,
+        rating: int | None = None,
+        themes: list[str] | None = None,
+        note: str | None = None,
     ) -> None:
         with self._Session() as db:
             rec = db.get(SessionRecord, session_id)
             if rec is None:
                 raise ValueError(f"Session not found: {session_id}")
-            rec.ended_at = datetime.now(timezone.utc)
+            rec.ended_at = datetime.now(UTC)
             rec.mood_after = mood_after
             rec.rating = rating
             if themes:
@@ -204,23 +311,44 @@ class SessionStore:
         session_id: str,
         role: str,
         content: str,
-        tokens: Optional[int] = None,
+        tokens: int | None = None,
         is_flagged: bool = False,
+        vault_passphrase: str | None = None,
     ) -> None:
+        """
+        Persist a message. For a vault session, `vault_passphrase` is required
+        and the content is encrypted with the vault key; a wrong/missing vault
+        passphrase raises PermissionError and nothing is written.
+        """
         with self._Session() as db:
+            rec = db.get(SessionRecord, session_id)
+            if rec is None:
+                raise ValueError(f"Session not found: {session_id}")
+            enc = self._encryptor_for(rec, vault_passphrase)
             msg = MessageRecord(
                 session_id=session_id,
                 role=role,
-                content_enc=self._enc.encrypt(content),
-                timestamp=datetime.now(timezone.utc),
+                content_enc=enc.encrypt(content),
+                timestamp=datetime.now(UTC),
                 tokens=tokens,
                 is_flagged=is_flagged,
             )
             db.add(msg)
             db.commit()
 
-    def load_messages(self, session_id: str) -> list[Message]:
+    def load_messages(
+        self, session_id: str, vault_passphrase: str | None = None
+    ) -> list[Message]:
+        """
+        Load a session's messages. For a vault session, `vault_passphrase` is
+        required; a wrong/missing one raises PermissionError (the ciphertext is
+        never returned without the correct key).
+        """
         with self._Session() as db:
+            rec = db.get(SessionRecord, session_id)
+            if rec is None:
+                raise ValueError(f"Session not found: {session_id}")
+            enc = self._encryptor_for(rec, vault_passphrase)
             records = (
                 db.query(MessageRecord)
                 .filter(MessageRecord.session_id == session_id)
@@ -230,7 +358,7 @@ class SessionStore:
             return [
                 Message(
                     role=r.role,
-                    content=self._enc.decrypt(r.content_enc),
+                    content=enc.decrypt(r.content_enc),
                     timestamp=r.timestamp,
                     tokens=r.tokens,
                     is_flagged=r.is_flagged,
@@ -285,7 +413,7 @@ class SessionStore:
 
     def _hydrate_session(self, rec: SessionRecord) -> TherapySession:
         themes: list[str] = []
-        note: Optional[str] = None
+        note: str | None = None
         if rec.themes_enc:
             themes = json.loads(self._enc.decrypt(rec.themes_enc))
         if rec.note_enc:
