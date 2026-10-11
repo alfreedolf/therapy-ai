@@ -13,7 +13,10 @@ from therapy_ai.domain import Message
 from therapy_ai.ui.closing import (
     CLOSING_MARKER,
     ClosingConfig,
+    _load_phrase_file,
+    detect_acknowledgement,
     detect_closing_intent,
+    detect_save_intent,
     inject_closing_marker,
     is_closing_context,
     should_auto_close,
@@ -21,7 +24,6 @@ from therapy_ai.ui.closing import (
     should_time_close,
     time_remaining_seconds,
 )
-
 
 # ── ClosingConfig.from_yaml ───────────────────────────────────────────────────
 
@@ -237,3 +239,100 @@ class TestTimeRemaining:
     def test_clamped_to_zero(self):
         start = 1000.0
         assert time_remaining_seconds(start, 3, now=start + 999) == 0.0
+
+
+# ── Acknowledgement detection (feature 2a) ─────────────────────────────────────
+
+class TestDetectAcknowledgement:
+    @pytest.mark.parametrize("text", [
+        "ok",
+        "OK!",
+        "okay",
+        "ok thanks",
+        "ok talk to you soon",
+        "ok until next time",
+        "alright",
+        "sounds good",
+    ])
+    def test_acknowledgements_detected(self, text):
+        assert detect_acknowledgement(text, ClosingConfig()) is True
+
+    @pytest.mark.parametrize("text", [
+        "ok but my mother called me yesterday",  # 'ok' + more -> NOT an ack
+        "okay so here's the thing",
+        "I feel sad",
+        "",
+        "   ",
+    ])
+    def test_non_acknowledgements_ignored(self, text):
+        # Exact-match on the whole normalised message, not a substring.
+        assert detect_acknowledgement(text, ClosingConfig()) is False
+
+    def test_disabled_by_config(self):
+        cfg = ClosingConfig(detect_keyphrases=False)
+        assert detect_acknowledgement("ok", cfg) is False
+
+
+# ── Save / discard intent (feature 2b) ─────────────────────────────────────────
+
+class TestDetectSaveIntent:
+    @pytest.mark.parametrize("text", [
+        "please save this session",
+        "save the session",
+        "keep this conversation",
+    ])
+    def test_save_intent(self, text):
+        assert detect_save_intent(text, ClosingConfig()) == "save"
+
+    @pytest.mark.parametrize("text", [
+        "don't save this session",
+        "do not keep this",
+        "discard this session",
+        "delete this session",
+    ])
+    def test_discard_intent(self, text):
+        assert detect_save_intent(text, ClosingConfig()) == "discard"
+
+    def test_discard_wins_over_save(self):
+        # "don't save this" contains "save this" — the negative must win.
+        assert detect_save_intent("don't save this session", ClosingConfig()) == "discard"
+
+    @pytest.mark.parametrize("text", [
+        "I feel anxious about my job",
+        "we talked about my mother",
+        "",
+    ])
+    def test_no_intent(self, text):
+        assert detect_save_intent(text, ClosingConfig()) is None
+
+
+# ── Phrase-file loading & fallback ─────────────────────────────────────────────
+
+class TestPhraseFileLoading:
+    def test_loads_all_categories_from_file(self):
+        phrases = _load_phrase_file("config/closing_phrases.yaml")
+        assert set(phrases) == {"closing", "acknowledgement", "save", "discard"}
+        assert "ok" in phrases["acknowledgement"]
+        assert all(isinstance(v, tuple) for v in phrases.values())
+
+    def test_missing_file_falls_back_to_defaults(self):
+        from therapy_ai.ui.closing import DEFAULT_ACK_PHRASES
+        phrases = _load_phrase_file("config/does_not_exist.yaml")
+        assert phrases["acknowledgement"] == DEFAULT_ACK_PHRASES
+
+    def test_partial_file_fills_missing_categories(self, tmp_path):
+        from therapy_ai.ui.closing import DEFAULT_SAVE_PHRASES
+        # A file that defines only 'closing' should keep defaults elsewhere.
+        p = tmp_path / "partial.yaml"
+        p.write_text("closing:\n  - \"basta\"\n")
+        phrases = _load_phrase_file(p)
+        assert phrases["closing"] == ("basta",)
+        assert phrases["save"] == DEFAULT_SAVE_PHRASES
+
+    def test_config_wires_phrase_lists(self):
+        cfg = ClosingConfig.from_yaml(
+            "config/default_config.yaml", "config/closing_phrases.yaml"
+        )
+        assert len(cfg.ack_phrases) >= 10
+        assert len(cfg.save_phrases) >= 3
+        assert len(cfg.discard_phrases) >= 3

@@ -27,7 +27,9 @@ from therapy_ai.domain import Message
 from therapy_ai.memory.session_store import SessionStore
 from therapy_ai.ui.closing import (
     ClosingConfig,
+    detect_acknowledgement,
     detect_closing_intent,
+    detect_save_intent,
     inject_closing_marker,
     should_auto_close,
     should_show_wrapup_button,
@@ -54,9 +56,12 @@ def _ensure_state() -> None:
         "current_session": None,
         "turn_count":      0,       # counts completed user turns in this session
         "closing_mode":    False,   # True once the closing ritual is active
+        "closing_turns":   0,       # how many assistant turns have run in closing mode
         "checkout":        False,   # True once the user asked to end -> show checkout form
         "started_at":      None,    # epoch seconds when the session began (for time-box)
         "duration_min":    None,    # optional user-chosen session length in minutes
+        "save_by_default": True,    # whether the session is kept on close
+        "save_override":   None,    # "save"/"discard" if the user said so explicitly
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -167,6 +172,21 @@ def render() -> None:
                 st.markdown(user_input)
             return
 
+        # Explicit save/discard intent ("save this" / "don't save this")
+        # overrides the start-screen toggle for this session.
+        intent = detect_save_intent(user_input, closing_cfg)
+        if intent is not None:
+            st.session_state.save_override = intent
+
+        # Acknowledgement (2a): a short "ok / ok talk soon" ONLY counts as an
+        # end-signal when we're already in closing mode — otherwise a bare "ok"
+        # mid-conversation would end the session prematurely. Persist the
+        # message first so it isn't lost, then go to the check-out form.
+        if closing_mode and detect_acknowledgement(user_input, closing_cfg):
+            store.add_message(session_id, "user", user_input)
+            st.session_state.checkout = True
+            st.rerun()
+
         # Keyphrase trigger: if the user signals they want to leave
         # ("I have to go", "thanks, talk soon"), enter closing mode so the
         # model's reply to THIS message is already the start of the ritual.
@@ -179,9 +199,12 @@ def render() -> None:
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Build context, injecting [CLOSING_MODE] when active
+        # Build context. Inject [CLOSING_MODE] only for the FIRST closing turn —
+        # once the model has delivered one closing message, stop re-injecting so
+        # it doesn't repeat the full goodbye every subsequent turn.
         context = builder.build(session_id, latest_user_text=user_input)
-        if closing_mode:
+        inject_closing = closing_mode and st.session_state.closing_turns == 0
+        if inject_closing:
             context = inject_closing_marker(context)
         context.append(Message(role="user", content=user_input))
 
@@ -211,12 +234,19 @@ def render() -> None:
 
         # Increment turn count after a completed exchange
         st.session_state.turn_count += 1
+        # Track closing turns so the ritual is delivered once, not repeated.
+        if closing_mode:
+            st.session_state.closing_turns += 1
         st.rerun()
 
     # ── Soft end-session area (shown below chat when closing) ─────────────────
     if closing_mode:
         st.divider()
-        st.caption("Ready to close when you are.")
+        if st.session_state.closing_turns >= 1:
+            # The ritual has been delivered — steer gently to the close.
+            st.caption("We've reached a natural place to close. Whenever you're ready.")
+        else:
+            st.caption("Ready to close when you are.")
         if st.button("Save & close session 🌱", use_container_width=True, type="primary"):
             st.session_state.checkout = True
             st.rerun()
@@ -239,6 +269,15 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
     )
     duration_min = None if duration_label == "No limit" else int(duration_label.split()[0])
 
+    # Whether this session is kept after it ends. Default on — the app's value
+    # (mood trends, memory, fine-tuning) depends on saved sessions. The user can
+    # still override at the end by saying e.g. "don't save this".
+    save_by_default = st.checkbox(
+        "Save this session",
+        value=True,
+        help="If off, the session is discarded when it ends (with a confirmation).",
+    )
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Start Session 🌿", use_container_width=True, type="primary"):
@@ -246,9 +285,12 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
             st.session_state.current_session = sid
             st.session_state.turn_count = 0
             st.session_state.closing_mode = False
+            st.session_state.closing_turns = 0
             st.session_state.checkout = False
             st.session_state.started_at = time.time()
             st.session_state.duration_min = duration_min
+            st.session_state.save_by_default = save_by_default
+            st.session_state.save_override = None
             st.rerun()
     with col2:
         st.info("🔒 This session is encrypted locally. Nothing leaves your device.")
@@ -261,8 +303,56 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
         )
 
 
+def _reset_session_state() -> None:
+    """Clear all per-session state after a session ends."""
+    st.session_state.current_session = None
+    st.session_state.turn_count = 0
+    st.session_state.closing_mode = False
+    st.session_state.closing_turns = 0
+    st.session_state.checkout = False
+    st.session_state.started_at = None
+    st.session_state.duration_min = None
+    st.session_state.save_override = None
+
+
 def _render_end_ui(store: SessionStore, session_id: str) -> None:
-    """Mood check-out + save."""
+    """
+    Session check-out. Honours the save decision: an explicit in-chat override
+    ("save"/"discard") wins over the start-screen toggle. Discarding is
+    irreversible, so it is gated behind a confirmation.
+    """
+    # Resolve the effective save decision.
+    override = st.session_state.get("save_override")
+    will_save = (
+        override != "discard"
+        if override is not None
+        else st.session_state.get("save_by_default", True)
+    )
+
+    # ── Discard path ──────────────────────────────────────────────────────────
+    if not will_save:
+        st.markdown("### Discard this session?")
+        st.warning(
+            "This session will be **permanently deleted** — messages and all. "
+            "This cannot be undone."
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Delete permanently", type="primary", use_container_width=True):
+                store.delete_session(session_id)
+                _reset_session_state()
+                st.success("Session discarded. Nothing was kept.")
+                st.rerun()
+        with col_b:
+            if st.button("← Keep it after all", use_container_width=True):
+                # Flip to saving: clear the discard override and fall through to
+                # the save form on the next run.
+                st.session_state.save_override = "save"
+                st.session_state.save_by_default = True
+                st.rerun()
+        return
+
+    # ── Save path ──────────────────────────────────────────────────────────────
     st.markdown("### How do you feel now?")
     mood_after = st.slider("Mood after session", 1, 10, 5, key="mood_after")
     rating = st.select_slider(
@@ -279,13 +369,7 @@ def _render_end_ui(store: SessionStore, session_id: str) -> None:
                 rating=rating,
                 note=note or None,
             )
-            # Reset all session-level state
-            st.session_state.current_session = None
-            st.session_state.turn_count = 0
-            st.session_state.closing_mode = False
-            st.session_state.checkout = False
-            st.session_state.started_at = None
-            st.session_state.duration_min = None
+            _reset_session_state()
             st.success("Session saved. Take care of yourself 🌱")
             st.rerun()
     with col_b:
