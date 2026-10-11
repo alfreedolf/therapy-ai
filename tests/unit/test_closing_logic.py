@@ -13,10 +13,13 @@ from therapy_ai.domain import Message
 from therapy_ai.ui.closing import (
     CLOSING_MARKER,
     ClosingConfig,
+    detect_closing_intent,
     inject_closing_marker,
     is_closing_context,
     should_auto_close,
     should_show_wrapup_button,
+    should_time_close,
+    time_remaining_seconds,
 )
 
 
@@ -147,3 +150,90 @@ class TestSystemPromptProtocol:
         assert "summarise" in text or "summarize" in text
         assert "insight" in text
         assert "anchor" in text or "between-session" in text
+
+
+# ── Keyphrase intent detection ────────────────────────────────────────────────
+
+class TestDetectClosingIntent:
+    @pytest.mark.parametrize("text", [
+        "I have to go",
+        "I have to go now, sorry",
+        "Thanks, talk to you soon!",
+        "ok, that's all for today",
+        "This is over.",
+        "Thank you, until next time.",
+        "Let's wrap up please",
+        "goodbye for now",
+    ])
+    def test_closing_phrases_detected(self, text):
+        assert detect_closing_intent(text, ClosingConfig()) is True
+
+    def test_case_and_punctuation_insensitive(self):
+        assert detect_closing_intent("I HAVE TO GO!!!", ClosingConfig()) is True
+        assert detect_closing_intent("...talk, to you, soon...", ClosingConfig()) is True
+
+    @pytest.mark.parametrize("text", [
+        "I feel resentment toward my parents.",
+        "I had to go to work early and it stressed me out.",  # 'had to go', not 'have to go'
+        "We talked about my relationship with my mother.",
+        "",
+        "   ",
+    ])
+    def test_non_closing_messages_ignored(self, text):
+        assert detect_closing_intent(text, ClosingConfig()) is False
+
+    def test_disabled_by_config(self):
+        cfg = ClosingConfig(detect_keyphrases=False)
+        assert detect_closing_intent("I have to go", cfg) is False
+
+    def test_custom_phrase_list(self):
+        cfg = ClosingConfig(closing_phrases=("basta cosi",))
+        assert detect_closing_intent("ok, basta così", cfg) is True
+        assert detect_closing_intent("I have to go", cfg) is False  # defaults replaced
+
+
+# ── Timed-session wind-down ────────────────────────────────────────────────---
+
+class TestShouldTimeClose:
+    def test_untimed_session_never_closes(self):
+        cfg = ClosingConfig()
+        assert should_time_close(None, None, cfg) is False
+        assert should_time_close(1000.0, None, cfg, now=999999.0) is False
+        assert should_time_close(1000.0, 0, cfg, now=999999.0) is False
+
+    def test_closes_at_fraction_point(self):
+        cfg = ClosingConfig(time_close_at_fraction=0.80, time_close_floor_seconds=30)
+        start = 1000.0
+        # 3-min session: fraction gives 144s, floor gives 150s -> earlier (144s) wins
+        assert should_time_close(start, 3, cfg, now=start + 143) is False
+        assert should_time_close(start, 3, cfg, now=start + 144) is True
+
+    def test_floor_wins_for_short_session(self):
+        # 1-min session: fraction 0.8 -> 48s, floor (60-30)=30s -> 30s is earlier
+        cfg = ClosingConfig(time_close_at_fraction=0.80, time_close_floor_seconds=30)
+        start = 500.0
+        assert should_time_close(start, 1, cfg, now=start + 29) is False
+        assert should_time_close(start, 1, cfg, now=start + 30) is True
+
+    def test_long_session_uses_fraction(self):
+        # 50-min session: fraction 0.8 -> 2400s; floor (3000-30)=2970s -> fraction earlier
+        cfg = ClosingConfig(time_close_at_fraction=0.80, time_close_floor_seconds=30)
+        start = 0.0
+        assert should_time_close(start, 50, cfg, now=2399) is False
+        assert should_time_close(start, 50, cfg, now=2400) is True
+
+
+class TestTimeRemaining:
+    def test_none_when_untimed(self):
+        assert time_remaining_seconds(None, None) is None
+        assert time_remaining_seconds(1000.0, None) is None
+        assert time_remaining_seconds(1000.0, 0) is None
+
+    def test_counts_down(self):
+        start = 1000.0
+        assert time_remaining_seconds(start, 3, now=start) == 180.0
+        assert time_remaining_seconds(start, 3, now=start + 60) == 120.0
+
+    def test_clamped_to_zero(self):
+        start = 1000.0
+        assert time_remaining_seconds(start, 3, now=start + 999) == 0.0

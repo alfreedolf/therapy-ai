@@ -81,3 +81,28 @@ session_closing:
   # Whether to allow the user to manually trigger closing at any time via
   # a sidebar button, regardless of turn count.
   allow_manual_trigger: true
+
+  # ── Timed-session wind-down ──────────────────────────────────────────────
+  #
+  # When the user chooses a session length (e.g. 3 / 15 / 30 / 50 min), the
+  # closing ritual begins automatically as the time nears its end — mirroring
+  # how a therapist gives a time warning in the last ~10–20% of a session.
+  #
+  # Closing starts at `time_close_at_fraction` of the chosen duration, but no
+  # later than (duration - time_close_floor_seconds) so very short sessions
+  # still get a sensible wind-down window. Whichever comes first wins.
+  time_close_at_fraction: 0.80   # last 20% of the session
+  time_close_floor_seconds: 30   # always leave >= 30s to wind down
+
+  # ── Keyphrase intent ─────────────────────────────────────────────────────
+  #
+  # If the user signals they want to leave ("I have to go", "talk to you
+  # soon"), the model's reply to that message begins the closing ritual.
+  # Matching is case- and punctuation-insensitive. Set detect_keyphrases to
+  # false to disable, or override `closing_phrases` to supply your own list
+  # (replaces the built-in defaults entirely).
+  detect_keyphrases: true
+  # closing_phrases:
+  #   - "i have to go"
+  #   - "talk to you soon"
+  #   - "that's all for today"
