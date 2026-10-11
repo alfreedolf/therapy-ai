@@ -5,20 +5,36 @@ Shared fixtures for the whole suite.
 
 Test layers
 ───────────
-tests/unit/       — pure logic, no I/O, no framework (closing decisions, config)
-tests/component/  — real collaborators wired together (SessionStore + ContextBuilder)
+tests/unit/       — pure logic, no I/O, no framework (closing decisions, safety)
+tests/component/  — real collaborators with I/O (SessionStore, ContextBuilder)
 tests/e2e/        — full session lifecycle driven through a fake inference engine
 """
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import pytest
 
+from therapy_ai.core.safety import SafetyGuard
 from therapy_ai.domain import GenerationResult, Message
-from therapy_ai.memory.session_store import SessionStore
+from therapy_ai.memory.session_store import Encryptor, SessionStore
+
+# ── Encryption isolation ──────────────────────────────────────────────────────
+
+@pytest.fixture(autouse=True)
+def isolated_salt(tmp_path, monkeypatch):
+    """
+    Redirect the encryptor's salt file into the test's tmp dir.
+
+    Encryptor.SALT_FILE is a hardcoded module constant ("data/.salt"). Without
+    this redirect, tests would read/write the user's real salt file and could
+    interfere with their actual encrypted data. Each test gets a fresh salt.
+    """
+    salt_path = tmp_path / ".salt"
+    monkeypatch.setattr(Encryptor, "SALT_FILE", str(salt_path))
+    return salt_path
 
 
 # ── Config file fixtures ──────────────────────────────────────────────────────
@@ -43,12 +59,20 @@ def write_config(tmp_path: Path):
                 f"  warn_before_turns: {warn_before_turns}\n"
                 f"  allow_manual_trigger: {str(allow_manual_trigger).lower()}\n"
             )
-        cfg = "ui:\n  locale: \"EN\"\n" + block
+        cfg = 'ui:\n  locale: "EN"\n' + block
         path = tmp_path / "default_config.yaml"
         path.write_text(cfg)
         return path
 
     return _write
+
+
+# ── Safety fixtures ───────────────────────────────────────────────────────────
+
+@pytest.fixture
+def guard() -> SafetyGuard:
+    """A SafetyGuard with default (DE) locale."""
+    return SafetyGuard(locale="DE")
 
 
 # ── Storage fixtures ──────────────────────────────────────────────────────────
@@ -57,7 +81,7 @@ def write_config(tmp_path: Path):
 def store(tmp_path: Path) -> SessionStore:
     """A real SessionStore backed by a throwaway encrypted SQLite file."""
     db_path = tmp_path / "sessions.db"
-    return SessionStore(passphrase="test-passphrase-1234", db_path=db_path)
+    return SessionStore(passphrase="correct-horse-battery-staple", db_path=db_path)
 
 
 # ── Fake inference engine ─────────────────────────────────────────────────────

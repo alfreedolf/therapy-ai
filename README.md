@@ -1,7 +1,76 @@
-# Therapy AI — Local Privacy-Preserving Psychotherapy System
+# Therapy AI — Local Privacy-Preserving Support Companion
 
-A fully offline, encrypted AI-powered therapy assistant that runs on your local hardware.
-No data ever leaves your device.
+A safety-conscious conversational AI prototype exploring memory, retrieval, model
+orchestration, and evaluation for mental-health support workflows. Runs fully offline
+and encrypted on your local hardware — no data ever leaves your device.
+
+> [!IMPORTANT]
+> **This is a research prototype, not a medical device.** It is not a substitute for
+> professional mental-health care, diagnosis, or treatment, and it has not been
+> clinically validated. It cannot handle emergencies. If you are in crisis or may be a
+> danger to yourself or others, contact your local emergency services or a crisis
+> helpline immediately. See [findahelpline.com](https://findahelpline.com) for
+> resources in your country.
+
+## At a glance
+
+| | |
+|---|---|
+| **Problem** | Journalling and reflective mental-health support tools typically send deeply personal data to the cloud. This explores whether a useful, safety-aware reflective companion can run **entirely on local hardware** with no data egress. |
+| **Maturity** | Working **prototype** — functional end to end, but experimental and not clinically validated or production-hardened. |
+| **LLM** | Local open-weight instruct models (Llama 3.1 8B, Qwen2.5 7B/14B, Gemma 2). Swappable from the UI — no code change. **No external API; no OpenAI/Anthropic calls.** |
+| **Inference** | Hardware-abstracted: **MLX** on Apple Silicon, **CUDA** (Unsloth/Transformers) on NVIDIA, CPU fallback. One `BackendFactory` picks the path at runtime. |
+| **Retrieval** | Local semantic memory via **`sqlite-vec`** + **`all-MiniLM-L6-v2`** embeddings (384-dim), stored in the same encrypted SQLite DB. No external vector store. |
+| **Memory** | Two layers — a keyword/theme preamble from recent sessions, plus semantic retrieval of the most relevant past sessions for the current message. Sliding-window truncation on current-session history. |
+| **Safety** | Pre-LLM screening (crisis / prompt-injection / hard-block) with locale-aware crisis resources; post-LLM output token scrubbing; an automatic, clinically-modelled session-closing ritual. |
+| **Evaluation** | A composite GRPO reward signal (user rating 60% + empathy markers + response structure + safety penalty) for optional local LoRA fine-tuning on your own rated sessions. |
+| **Privacy** | AES-256-GCM at rest, PBKDF2-SHA256 (480k iters) key derived in-memory from a passphrase that is never stored. Zero telemetry. |
+| **Tests** | `pytest` suite structured into unit / component / e2e layers covering safety screening, encryption isolation, and the session-closing logic. |
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[User] --> UI[Streamlit UI<br/>chat · progress · settings]
+    UI --> SG[SafetyGuard<br/>crisis / injection / block screen]
+    SG -->|blocked / crisis| CR[Crisis resources<br/>no model call]
+    SG -->|safe| CB[ContextBuilder]
+
+    subgraph MEM [Local encrypted memory]
+        SS[(SQLite<br/>AES-256-GCM)]
+        VEC[(sqlite-vec<br/>MiniLM embeddings)]
+    end
+
+    CB --> SS
+    CB --> VEC
+    CB --> ENG[InferenceEngine<br/>streaming]
+
+    ENG --> BF{BackendFactory}
+    BF -->|Apple Silicon| MLX[MLX]
+    BF -->|NVIDIA| CUDA[CUDA / Unsloth]
+    BF -->|fallback| CPU[CPU / Transformers]
+
+    MLX --> OUT[Token stream]
+    CUDA --> OUT
+    CPU --> OUT
+    OUT --> SGO[Output scrub] --> UI
+
+    UI -.rated sessions.-> EXP[JSONL export] -.-> FT[LoRA SFT / GRPO<br/>reward: rating+empathy+structure+safety]
+    FT -.adapter.-> ENG
+```
+
+**Flow:** every message is screened *before* it can reach the model. Safe input is enriched with cross-session memory (keyword preamble + semantic retrieval from the local vector index), streamed through whichever backend the hardware supports, and scrubbed on the way out. Rated sessions can be exported to fine-tune a local LoRA adapter against a composite quality reward — all offline.
+
+### Limitations
+- Not clinically validated; no guarantee of therapeutic quality or correctness.
+- Safety screening is regex-based — it catches common phrasings but has known gaps (documented as `xfail` tests) and is not a substitute for human oversight.
+- Evaluation is a heuristic reward proxy, not a validated outcome measure.
+- Single-user, local-only by design; no multi-user, auth, or hosting story.
+- Small quantised models can hallucinate or give shallow responses.
+
+---
+
+## Run it locally
 
 ```bash
 # One-time setup
@@ -10,7 +79,7 @@ uv sync --extra mac --extra dev      # or --extra cuda on NVIDIA
 # Run
 uv run python main.py ui
 ```
-Then open http://localhost:8501.
+Then open http://localhost:8501. Full setup details below.
 
 ---
 
@@ -200,3 +269,22 @@ uv run pytest
    ```
 3. Update `config/default_config.yaml` — switch `model_id` to a standard HuggingFace model if moving away from Mac (mlx-community models only run on Apple Silicon). See the comments in that file.
 4. `BackendFactory.detect()` auto-resolves the new backend. No code changes needed.
+
+---
+
+## License
+
+Copyright (C) 2026 Alfonso Ridolfo ([alfreedolf](https://github.com/alfreedolf))
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the **GNU Affero General Public License** as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+
+It is distributed in the hope that it will be useful, but **WITHOUT ANY WARRANTY**;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the [GNU AGPL](https://www.gnu.org/licenses/agpl-3.0.html) for details,
+or the [`LICENSE`](./LICENSE) file in this repository.
+
+The AGPL is a strong copyleft license: if you modify this software and make it
+available to others over a network (for example, as a hosted service), you must also
+make your modified source code available to those users under the same license.

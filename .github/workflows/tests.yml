@@ -1,0 +1,43 @@
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel an in-progress run when a newer commit is pushed to the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      # --frozen makes CI respect the committed uv.lock exactly and fail if it
+      # is out of date, so a local lockfile drift can't slip through unnoticed.
+      # --extra dev installs the platform-agnostic test deps only (no mac/cuda),
+      # which is correct for Linux CI — the test suite never loads MLX/CUDA.
+      - name: Install dependencies
+        run: uv sync --frozen --extra dev
+
+      # Advisory for now: the repo has a pre-existing lint backlog (~110 issues)
+      # to be cleared in a dedicated pass. continue-on-error keeps lint visible
+      # in the run without blocking merges. Flip to a hard gate once clean.
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: uv run ruff check .
+
+      # Hard gate: the test suite must pass for the check to go green.
+      - name: Run tests
+        run: uv run pytest

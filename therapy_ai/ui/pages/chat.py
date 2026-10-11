@@ -2,16 +2,22 @@
 therapy_ai/ui/pages/chat.py
 
 Main therapy chat page.
-Handles session lifecycle, streaming generation, safety routing,
-and the evidence-based session-closing ritual.
+Handles session lifecycle, streaming generation, safety routing, vault-locked
+sessions, and the evidence-based session-closing ritual.
 
 Closing-mode logic
 ──────────────────
 Turn count is tracked in st.session_state["turn_count"].
 Once it reaches the threshold defined in config (session_closing.auto_close_after_turns),
 a [CLOSING_MODE] marker is injected as a system message so the model follows the
-SESSION CLOSING protocol in system_prompt.txt.
-The user can also trigger closing manually at any time via the sidebar button.
+SESSION CLOSING protocol in system_prompt.txt. The user can also trigger closing
+manually, by a wind-down keyphrase, or by a timed-session limit.
+
+Vault logic
+───────────
+A vault session is locked with its own passphrase (separate from the app
+passphrase). Its content is encrypted with a vault key; the passphrase is held
+in st.session_state["vault_passphrase"] for the active session only.
 """
 
 from __future__ import annotations
@@ -52,16 +58,17 @@ def get_cached_engine() -> InferenceEngine:
 
 def _ensure_state() -> None:
     defaults = {
-        "engine":          get_cached_engine(),
-        "current_session": None,
-        "turn_count":      0,       # counts completed user turns in this session
-        "closing_mode":    False,   # True once the closing ritual is active
-        "closing_turns":   0,       # how many assistant turns have run in closing mode
-        "checkout":        False,   # True once the user asked to end -> show checkout form
-        "started_at":      None,    # epoch seconds when the session began (for time-box)
-        "duration_min":    None,    # optional user-chosen session length in minutes
-        "save_by_default": True,    # whether the session is kept on close
-        "save_override":   None,    # "save"/"discard" if the user said so explicitly
+        "engine":            get_cached_engine(),
+        "current_session":   None,
+        "turn_count":        0,       # completed user turns in this session
+        "closing_mode":      False,   # True once the closing ritual is active
+        "closing_turns":     0,       # assistant turns run in closing mode
+        "checkout":          False,   # True once the user asked to end
+        "started_at":        None,    # epoch seconds the session began (time-box)
+        "duration_min":      None,    # optional user-chosen session length (min)
+        "save_by_default":   True,    # whether the session is kept on close
+        "save_override":     None,    # "save"/"discard" if the user said so
+        "vault_passphrase":  None,    # in-memory vault secret for this session
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -74,7 +81,7 @@ def render() -> None:
     _ensure_state()
     closing_cfg = ClosingConfig.from_yaml(CONFIG_PATH)
 
-    store:   SessionStore  = st.session_state.store
+    store:   SessionStore    = st.session_state.store
     engine:  InferenceEngine = st.session_state.engine
     safety                   = st.session_state.safety
     builder                  = st.session_state.context_builder
@@ -89,9 +96,17 @@ def render() -> None:
     session_id   = st.session_state.current_session
     turn_count   = st.session_state.turn_count
     closing_mode = st.session_state.closing_mode
+    vault_pass   = st.session_state.get("vault_passphrase")
+
+    # ── Vault unlock gate ─────────────────────────────────────────────────────
+    # If this session is a vault and we don't hold a valid passphrase in memory,
+    # prompt to unlock before anything is loaded or sent.
+    if store.is_vault(session_id):
+        if not vault_pass or not store.verify_vault_passphrase(session_id, vault_pass):
+            _render_vault_unlock_ui(store, session_id)
+            return
 
     # ── Checkout form takes over the main column when requested ───────────────
-    # (Fix: previously rendered inside the sidebar, which looked cramped.)
     if st.session_state.checkout:
         _render_end_ui(store, session_id)
         return
@@ -141,7 +156,7 @@ def render() -> None:
             st.rerun()
 
     # ── Chat history ──────────────────────────────────────────────────────────
-    messages = store.load_messages(session_id)
+    messages = store.load_messages(session_id, vault_passphrase=vault_pass)
     for msg in messages:
         with st.chat_message(msg.role):
             st.markdown(msg.content)
@@ -167,7 +182,10 @@ def render() -> None:
 
         if safety_result.level == SafetyLevel.CRISIS:
             _render_crisis_banner(safety_result.message)
-            store.add_message(session_id, "user", user_input, is_flagged=True)
+            store.add_message(
+                session_id, "user", user_input, is_flagged=True,
+                vault_passphrase=vault_pass,
+            )
             with st.chat_message("user"):
                 st.markdown(user_input)
             return
@@ -183,7 +201,7 @@ def render() -> None:
         # mid-conversation would end the session prematurely. Persist the
         # message first so it isn't lost, then go to the check-out form.
         if closing_mode and detect_acknowledgement(user_input, closing_cfg):
-            store.add_message(session_id, "user", user_input)
+            store.add_message(session_id, "user", user_input, vault_passphrase=vault_pass)
             st.session_state.checkout = True
             st.rerun()
 
@@ -195,7 +213,7 @@ def render() -> None:
             closing_mode = True
 
         # Persist user message
-        store.add_message(session_id, "user", user_input)
+        store.add_message(session_id, "user", user_input, vault_passphrase=vault_pass)
         with st.chat_message("user"):
             st.markdown(user_input)
 
@@ -230,6 +248,7 @@ def render() -> None:
         store.add_message(
             session_id, "assistant", response_text,
             tokens=result.completion_tokens if result is not None else None,
+            vault_passphrase=vault_pass,
         )
 
         # Increment turn count after a completed exchange
@@ -278,10 +297,40 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
         help="If off, the session is discarded when it ends (with a confirmation).",
     )
 
+    # ── Vault lock (optional) ─────────────────────────────────────────────────
+    lock_vault = st.checkbox(
+        "🔒 Lock this session (vault)",
+        help=(
+            "Encrypt this session with its own passphrase, separate from your "
+            "app passphrase. No one — not even someone who knows your app "
+            "passphrase — can read it without the vault passphrase."
+        ),
+    )
+    vault_passphrase: str | None = None
+    if lock_vault:
+        vault_passphrase = st.text_input(
+            "Vault passphrase",
+            type="password",
+            help="You will need this exact passphrase to reopen the session.",
+        )
+        st.warning(
+            "⚠️ There is no recovery. If you forget this passphrase, the "
+            "session is permanently unreadable."
+        )
+
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Start Session 🌿", use_container_width=True, type="primary"):
-            sid = store.create_session(mood_before=mood)
+        start_disabled = lock_vault and not vault_passphrase
+        if st.button(
+            "Start Session 🌿",
+            use_container_width=True,
+            type="primary",
+            disabled=start_disabled,
+        ):
+            sid = store.create_session(
+                mood_before=mood,
+                vault_passphrase=vault_passphrase if lock_vault else None,
+            )
             st.session_state.current_session = sid
             st.session_state.turn_count = 0
             st.session_state.closing_mode = False
@@ -291,6 +340,8 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
             st.session_state.duration_min = duration_min
             st.session_state.save_by_default = save_by_default
             st.session_state.save_override = None
+            # Hold the vault passphrase in memory for THIS session only.
+            st.session_state.vault_passphrase = vault_passphrase if lock_vault else None
             st.rerun()
     with col2:
         st.info("🔒 This session is encrypted locally. Nothing leaves your device.")
@@ -313,6 +364,7 @@ def _reset_session_state() -> None:
     st.session_state.started_at = None
     st.session_state.duration_min = None
     st.session_state.save_override = None
+    st.session_state.vault_passphrase = None
 
 
 def _render_end_ui(store: SessionStore, session_id: str) -> None:
@@ -386,6 +438,29 @@ def _render_time_remaining(started_at, duration_min) -> None:
         return
     mins, secs = divmod(max(0, int(remaining)), 60)
     st.caption(f"⏳ ~{mins}:{secs:02d} remaining")
+
+
+def _render_vault_unlock_ui(store: SessionStore, session_id: str) -> None:
+    """Prompt for a vault session's passphrase before its content is shown."""
+    st.markdown("### 🔒 This session is locked")
+    st.caption(
+        "Enter the vault passphrase you set when you created this session. "
+        "There is no recovery if it is lost."
+    )
+    attempt = st.text_input("Vault passphrase", type="password", key="vault_unlock_input")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Unlock", type="primary", use_container_width=True):
+            if store.verify_vault_passphrase(session_id, attempt):
+                st.session_state.vault_passphrase = attempt
+                st.rerun()
+            else:
+                st.error("Incorrect vault passphrase.")
+    with col2:
+        if st.button("← Back", use_container_width=True):
+            st.session_state.current_session = None
+            st.session_state.vault_passphrase = None
+            st.rerun()
 
 
 def _render_crisis_banner(message: str) -> None:

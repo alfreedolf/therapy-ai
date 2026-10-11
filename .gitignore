@@ -66,3 +66,7 @@ models/
 htmlcov/
 .coverage
 coverage.xml
+
+# ── macOS AppleDouble metadata (created on non-native filesystems) ────────────
+._*
+.AppleDouble
