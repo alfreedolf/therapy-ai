@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# config/closing_phrases.yaml
+#
+# User-editable phrase lists for the session-closing ritual.
+#
+# Matching is case-, punctuation-, and accent-insensitive, so "così" matches
+# "cosi" and "Thanks, talk to you soon!" matches "talk to you soon". You can
+# add phrases in any language.
+#
+# Each category below REPLACES the built-in defaults for that category only.
+# Categories you leave out (or delete) fall back to the built-in defaults in
+# therapy_ai/ui/closing.py — so a partial file never wipes the other lists.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Phrases that signal the user wants to wind down / leave. Keep these
+# unambiguous — avoid words someone might use while exploring a topic
+# (e.g. "I have to leave my partner" should NOT end the session).
+closing:
+  - "i have to go"
+  - "i gotta go"
+  - "i need to go"
+  - "i have to leave now"
+  - "i need to leave now"
+  - "this is over"
+  - "that's all for today"
+  - "let's stop here"
+  - "let's wrap up"
+  - "i'm done for today"
+  - "thanks, until next time"
+  - "thank you, until next time"
+  - "talk to you soon"
+  - "talk to you next time"
+  - "see you next time"
+  - "goodbye for now"
+  - "bye for now"
+
+# Short confirmations that the user accepts the close. These are ONLY treated
+# as an end-signal once the session is ALREADY in closing mode — otherwise a
+# bare "ok" mid-conversation would end sessions prematurely.
+acknowledgement:
+  - "ok"
+  - "okay"
+  - "ok thanks"
+  - "okay thanks"
+  - "ok thank you"
+  - "ok talk to you soon"
+  - "ok talk soon"
+  - "ok until next time"
+  - "ok see you next time"
+  - "ok bye"
+  - "okay bye"
+  - "alright"
+  - "alright thanks"
+  - "sounds good"
+  - "got it thanks"
+
+# Explicit "keep this session" requests — override the start-screen save toggle.
+save:
+  - "save this session"
+  - "save the session"
+  - "please save this"
+  - "keep this session"
+  - "keep this conversation"
+  - "do save this"
+
+# Explicit "do not keep this session" requests — override the save toggle and
+# trigger a confirmation before the session is discarded.
+discard:
+  - "don't save this session"
+  - "don't save this"
+  - "don't save the session"
+  - "discard this session"
+  - "discard the session"
+  - "delete this session"
+  - "do not save this"
+  - "do not keep this"
