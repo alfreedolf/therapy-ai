@@ -2,19 +2,35 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: Main",
+            // CLI commands (info / check). Debugs directly; breakpoints in
+            // main.py and the core modules it calls will hit.
+            // Requires `uv sync` to have created .venv first.
+            "name": "Python: Main (CLI)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
+            "args": ["info"],
             "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python"
         },
         {
-            "name": "Python: UI",
+            // Debuggable Streamlit UI. Launches the streamlit module directly
+            // (instead of `main.py ui`, which spawns Streamlit as a child
+            // process the debugger can't attach to). This way breakpoints in
+            // therapy_ai/ui/app.py, chat.py, etc. are hit.
+            // Requires `uv sync` to have created .venv first.
+            "name": "Python: UI (Streamlit, debuggable)",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/main.py",
-            "args": ["ui"],
+            "module": "streamlit",
+            "args": [
+                "run",
+                "therapy_ai/ui/app.py",
+                "--server.port=8501",
+                "--server.headless=false",
+                "--browser.gatherUsageStats=false"
+            ],
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
