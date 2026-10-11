@@ -9,14 +9,15 @@ Domain types (Message, GenerationResult) now live in domain.py.
 from __future__ import annotations
 
 import logging
-from typing import Generator, Optional
-import mlx.core as mx
-from mlx_lm import stream_generate
-from mlx_lm.sample_utils import make_sampler, make_logits_processors  # ✅ Plural!
+from collections.abc import Generator
 
-from therapy_ai.core.model_manager import ModelManager, LoadedModel
 from therapy_ai.core.backend import HardwareBackend
-from therapy_ai.domain import Message, GenerationResult
+
+# NOTE: mlx / mlx_lm are imported lazily inside _stream_mlx (they are
+# Apple-Silicon only). Importing them at module scope would crash the whole
+# app on NVIDIA / CPU installs before BackendFactory can pick a non-MLX path.
+from therapy_ai.core.model_manager import LoadedModel, ModelManager
+from therapy_ai.domain import GenerationResult, Message
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class InferenceEngine:
             print(token, end="", flush=True)
     """
 
-    def __init__(self, manager: ModelManager, system_prompt: Optional[str] = None):
+    def __init__(self, manager: ModelManager, system_prompt: str | None = None):
         self.manager = manager
         self.system_prompt = system_prompt or self._default_system_prompt()
 
@@ -46,7 +47,7 @@ class InferenceEngine:
     def stream(
         self,
         messages: list[Message],
-        override_system: Optional[str] = None,
+        override_system: str | None = None,
     ) -> Generator[str, None, GenerationResult]:
         """
         Stream tokens one by one. Returns a GenerationResult via StopIteration.value.
@@ -77,7 +78,7 @@ class InferenceEngine:
     def generate(
         self,
         messages: list[Message],
-        override_system: Optional[str] = None,
+        override_system: str | None = None,
     ) -> GenerationResult:
         """Blocking (non-streaming) generation. Collects all tokens."""
         tokens: list[str] = []
@@ -123,8 +124,12 @@ class InferenceEngine:
     # ── Backend-specific streaming ────────────────────────────────────────────
     
     def _stream_mlx(self, prompt: str, loaded: LoadedModel) -> Generator[str, None, GenerationResult]:
-        
-        
+        # MLX is Apple-Silicon only — import here so the module stays importable
+        # on NVIDIA / CPU installs. Reached only when the MLX backend is active.
+        import mlx.core as mx
+        from mlx_lm import stream_generate
+        from mlx_lm.sample_utils import make_logits_processors, make_sampler
+
         cfg = loaded.config
         collected: list[str] = []
         prompt_toks = len(loaded.tokenizer.encode(prompt))
@@ -201,9 +206,9 @@ class InferenceEngine:
         loaded: LoadedModel,
     ) -> Generator[str, None, GenerationResult]:
         """CUDA streaming via Transformers TextIteratorStreamer."""
-        import torch
-        from transformers import TextIteratorStreamer
         import threading
+
+        from transformers import TextIteratorStreamer
 
         cfg = loaded.config
         tokenizer = loaded.tokenizer
@@ -248,9 +253,9 @@ class InferenceEngine:
         loaded: LoadedModel,
     ) -> Generator[str, None, GenerationResult]:
         """CPU fallback — no true streaming, simulates token-by-token."""
-        import torch
-        from transformers import TextIteratorStreamer
         import threading
+
+        from transformers import TextIteratorStreamer
 
         tokenizer = loaded.tokenizer
         model = loaded.model
