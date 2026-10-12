@@ -14,11 +14,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
-from therapy_ai.memory.session_store import SessionStore
 from therapy_ai.domain import Message
 from therapy_ai.memory.memory_retriever import MemoryRetriever
+from therapy_ai.memory.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +47,12 @@ class ContextBuilder:
     def __init__(
         self,
         store: SessionStore,
-        config: Optional[ContextConfig] = None,
-        retriever: Optional[MemoryRetriever] = None,
+        config: ContextConfig | None = None,
+        retriever: MemoryRetriever | None = None,
     ):
         self.store = store
         self.config = config or ContextConfig()
-        self._retriever: Optional[MemoryRetriever] = retriever
+        self._retriever: MemoryRetriever | None = retriever
         # Lazy-init retriever if semantic memory is enabled but none passed
         if self.config.use_semantic_memory and retriever is None:
             try:
@@ -62,35 +61,50 @@ class ContextBuilder:
                 logger.warning("Semantic memory unavailable: %s", e)
                 self._retriever = None
 
-    def build(self, current_session_id: str, latest_user_text: Optional[str] = None) -> list[Message]:
+    def build(
+        self,
+        current_session_id: str,
+        latest_user_text: str | None = None,
+        vault_passphrase: str | None = None,
+    ) -> list[Message]:
         """
         Return ordered Message list ready for InferenceEngine.stream().
         Pass latest_user_text to enable semantic retrieval against the current input.
         Does NOT include the system prompt — InferenceEngine adds that.
+
+        Vault sessions: pass `vault_passphrase` so the session's own messages can
+        be decrypted. Cross-session memory (keyword preamble + semantic retrieval)
+        is intentionally SKIPPED for a vault session — those read *other* sessions,
+        which may be locked with different passphrases, and a locked session must
+        not leak content from or into other sessions' memory (see epic #16).
         """
         messages: list[Message] = []
+        is_vault = vault_passphrase is not None
 
-        # Layer 1: keyword/theme preamble
-        preamble = self._build_preamble(current_session_id)
+        if not is_vault:
+            # Layer 1: keyword/theme preamble
+            preamble = self._build_preamble(current_session_id)
 
-        # Layer 2: semantic retrieval (if available + query text provided)
-        semantic_block = ""
-        if self._retriever and latest_user_text:
-            try:
-                semantic_block = self._retriever.retrieve_as_context_string(
-                    query=latest_user_text,
-                    top_k=self.config.semantic_top_k,
-                    exclude_session_id=current_session_id,
-                )
-            except Exception as e:
-                logger.debug("Semantic retrieval skipped: %s", e)
+            # Layer 2: semantic retrieval (if available + query text provided)
+            semantic_block = ""
+            if self._retriever and latest_user_text:
+                try:
+                    semantic_block = self._retriever.retrieve_as_context_string(
+                        query=latest_user_text,
+                        top_k=self.config.semantic_top_k,
+                        exclude_session_id=current_session_id,
+                    )
+                except Exception as e:
+                    logger.debug("Semantic retrieval skipped: %s", e)
 
-        combined = "\n\n".join(filter(None, [preamble, semantic_block]))
-        if combined:
-            messages.append(Message(role="system", content=combined))
+            combined = "\n\n".join(filter(None, [preamble, semantic_block]))
+            if combined:
+                messages.append(Message(role="system", content=combined))
 
         # Layer 3: current session messages (sliding window)
-        raw = self.store.load_messages(current_session_id)
+        raw = self.store.load_messages(
+            current_session_id, vault_passphrase=vault_passphrase
+        )
         history = self._truncate(raw)
         for msg in history:
             messages.append(Message(role=msg.role, content=msg.content))
@@ -149,7 +163,7 @@ class ContextBuilder:
 
         return " ".join(parts)
 
-    def _truncate(self, messages: list[StoredMessage]) -> list[StoredMessage]:
+    def _truncate(self, messages: list[Message]) -> list[Message]:
         """Keep only the most recent max_history_turns turn-pairs."""
         max_msgs = self.config.max_history_turns * 2
         if len(messages) <= max_msgs:
