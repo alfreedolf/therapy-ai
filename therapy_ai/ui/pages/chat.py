@@ -220,7 +220,9 @@ def render() -> None:
         # Build context. Inject [CLOSING_MODE] only for the FIRST closing turn —
         # once the model has delivered one closing message, stop re-injecting so
         # it doesn't repeat the full goodbye every subsequent turn.
-        context = builder.build(session_id, latest_user_text=user_input)
+        context = builder.build(
+            session_id, latest_user_text=user_input, vault_passphrase=vault_pass
+        )
         inject_closing = closing_mode and st.session_state.closing_turns == 0
         if inject_closing:
             context = inject_closing_marker(context)

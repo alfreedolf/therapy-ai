@@ -19,11 +19,9 @@ Recommended: all-MiniLM-L6-v2 (22 MB, very fast, good semantic quality).
 
 from __future__ import annotations
 
-import json
 import logging
 import struct
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +67,23 @@ class MemoryRetriever:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def index_session(self, session_id: str, text: str) -> None:
+    def index_session(self, session_id: str, text: str, is_vault: bool = False) -> None:
         """
         Embed `text` and upsert into the vector index.
         Call this at session close with the session's theme summary.
+
+        VAULT GUARD: this index stores `text` as plaintext and serves it to any
+        session (including non-vault ones) with no passphrase. Vault content must
+        never enter it, or a locked session would leak into open sessions. Callers
+        must pass is_vault=True for vault sessions; indexing is then refused.
         """
+        if is_vault:
+            logger.warning(
+                "Refusing to index vault session %s into the shared semantic "
+                "index (would leak vault content to non-vault sessions).",
+                session_id,
+            )
+            return
         vec = self._embed(text)
         conn = self._get_conn()
         # Upsert into metadata table
@@ -96,7 +106,7 @@ class MemoryRetriever:
         self,
         query: str,
         top_k: int = 3,
-        exclude_session_id: Optional[str] = None,
+        exclude_session_id: str | None = None,
     ) -> list[dict]:
         """
         Find the top_k most semantically similar past sessions to `query`.
@@ -131,7 +141,7 @@ class MemoryRetriever:
         self,
         query: str,
         top_k: int = 3,
-        exclude_session_id: Optional[str] = None,
+        exclude_session_id: str | None = None,
     ) -> str:
         """
         Convenience wrapper — returns a formatted string ready to inject
