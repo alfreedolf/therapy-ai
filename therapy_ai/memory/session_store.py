@@ -171,7 +171,47 @@ class SessionStore:
             dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
         Base.metadata.create_all(self._engine)
+        self._migrate_schema()
         self._Session = sessionmaker(bind=self._engine, expire_on_commit=False)
+
+    def _migrate_schema(self) -> None:
+        """
+        Lightweight additive migration for existing databases.
+
+        SQLAlchemy's create_all() creates missing *tables* but never alters an
+        existing one, so a DB created before a column was added (e.g. the vault
+        columns) is missing them and inserts fail. Here we compare each ORM
+        table's declared columns against what the DB actually has and ADD any
+        that are missing. Additive only — nothing is dropped or rewritten, so
+        existing rows and data are preserved.
+        """
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(self._engine)
+        existing_tables = set(inspector.get_table_names())
+
+        with self._engine.begin() as conn:
+            for table in Base.metadata.sorted_tables:
+                if table.name not in existing_tables:
+                    continue  # create_all already handled brand-new tables
+                have = {c["name"] for c in inspector.get_columns(table.name)}
+                for col in table.columns:
+                    if col.name in have:
+                        continue
+                    ddl_type = col.type.compile(dialect=self._engine.dialect)
+                    default = ""
+                    if col.default is not None and getattr(col.default, "arg", None) is not None:
+                        arg = col.default.arg
+                        literal = int(arg) if isinstance(arg, bool) else arg
+                        default = f" DEFAULT {literal!r}" if isinstance(literal, str) else f" DEFAULT {literal}"
+                    elif not col.nullable:
+                        # A non-nullable column needs a default to back-fill
+                        # existing rows; 0/'' are safe neutral choices.
+                        default = " DEFAULT 0"
+                    conn.execute(
+                        text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {ddl_type}{default}')
+                    )
+                    logger.info("Schema migration: added %s.%s", table.name, col.name)
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
