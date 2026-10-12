@@ -20,6 +20,7 @@ dependencies = [
     "rich>=13.0",          # beautiful CLI output
     "typer>=0.12",         # CLI launcher
     "pydantic>=2.7",       # config validation
+    "psutil>=5.9",         # hardware/memory detection in core.backend
     "huggingface-hub>=0.23",
     "datasets>=2.19",
     "transformers>=4.41",
