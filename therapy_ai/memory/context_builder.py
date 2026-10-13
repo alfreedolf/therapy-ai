@@ -56,7 +56,10 @@ class ContextBuilder:
         # Lazy-init retriever if semantic memory is enabled but none passed
         if self.config.use_semantic_memory and retriever is None:
             try:
-                self._retriever = MemoryRetriever(db_path=store._engine.url.database)
+                self._retriever = MemoryRetriever(
+                    db_path=store._engine.url.database,
+                    encryptor=store.active_encryptor,
+                )
             except Exception as e:
                 logger.warning("Semantic memory unavailable: %s", e)
                 self._retriever = None
@@ -65,46 +68,46 @@ class ContextBuilder:
         self,
         current_session_id: str,
         latest_user_text: str | None = None,
-        vault_passphrase: str | None = None,
     ) -> list[Message]:
         """
         Return ordered Message list ready for InferenceEngine.stream().
         Pass latest_user_text to enable semantic retrieval against the current input.
         Does NOT include the system prompt — InferenceEngine adds that.
 
-        Vault sessions: pass `vault_passphrase` so the session's own messages can
-        be decrypted. Cross-session memory (keyword preamble + semantic retrieval)
-        is intentionally SKIPPED for a vault session — those read *other* sessions,
-        which may be locked with different passphrases, and a locked session must
-        not leak content from or into other sessions' memory (see epic #16).
+        Memory semantics (post vault-retirement):
+          * The current conversation's OWN history is ALWAYS included.
+          * Whether this conversation RECEIVES cross-session context is governed
+            by the global recall settings on this builder's ContextConfig
+            (`include_themes`, `use_semantic_memory`) — NOT by any per-session
+            flag. There is no implicit "isolated mode".
+          * Whether a PAST conversation may CONTRIBUTE to that cross-session
+            context is governed by its own persisted `memory_opt_in` flag, which
+            is enforced at index/preamble time (see _build_preamble and the
+            retriever), not here.
         """
         messages: list[Message] = []
-        is_vault = vault_passphrase is not None
 
-        if not is_vault:
-            # Layer 1: keyword/theme preamble
-            preamble = self._build_preamble(current_session_id)
+        # Layer 1: keyword/theme preamble (receiving — global recall policy)
+        preamble = self._build_preamble(current_session_id)
 
-            # Layer 2: semantic retrieval (if available + query text provided)
-            semantic_block = ""
-            if self._retriever and latest_user_text:
-                try:
-                    semantic_block = self._retriever.retrieve_as_context_string(
-                        query=latest_user_text,
-                        top_k=self.config.semantic_top_k,
-                        exclude_session_id=current_session_id,
-                    )
-                except Exception as e:
-                    logger.debug("Semantic retrieval skipped: %s", e)
+        # Layer 2: semantic retrieval (receiving — global recall policy)
+        semantic_block = ""
+        if self._retriever and latest_user_text:
+            try:
+                semantic_block = self._retriever.retrieve_as_context_string(
+                    query=latest_user_text,
+                    top_k=self.config.semantic_top_k,
+                    exclude_session_id=current_session_id,
+                )
+            except Exception as e:
+                logger.debug("Semantic retrieval skipped: %s", e)
 
-            combined = "\n\n".join(filter(None, [preamble, semantic_block]))
-            if combined:
-                messages.append(Message(role="system", content=combined))
+        combined = "\n\n".join(filter(None, [preamble, semantic_block]))
+        if combined:
+            messages.append(Message(role="system", content=combined))
 
-        # Layer 3: current session messages (sliding window)
-        raw = self.store.load_messages(
-            current_session_id, vault_passphrase=vault_passphrase
-        )
+        # Layer 3: current session messages (sliding window) — always included.
+        raw = self.store.load_messages(current_session_id)
         history = self._truncate(raw)
         for msg in history:
             messages.append(Message(role=msg.role, content=msg.content))
@@ -129,12 +132,17 @@ class ContextBuilder:
             return ""
 
         sessions = self.store.list_sessions(
-            limit=self.config.previous_sessions_count + 5
+            limit=self.config.previous_sessions_count + 20
         )
-        # Filter out current session and unclosed sessions
+        # Only sessions that (a) are not the current one, (b) are closed, and
+        # (c) have explicitly opted in to CONTRIBUTING to cross-session memory.
+        # list_sessions already excludes unretired vault rows.
+        contributing_ids = set(self.store.contributing_session_ids())
         closed = [
             s for s in sessions
-            if s.id != current_session_id and s.ended_at is not None
+            if s.id != current_session_id
+            and s.ended_at is not None
+            and s.id in contributing_ids
         ][: self.config.previous_sessions_count]
 
         if not closed:

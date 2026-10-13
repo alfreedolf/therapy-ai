@@ -41,33 +41,35 @@ class TestRoundTrip:
 
 
 class TestPassphraseIsolation:
-    def test_wrong_passphrase_cannot_decrypt(self, tmp_path):
+    def test_wrong_passphrase_cannot_unlock(self, tmp_path):
         """
-        The central privacy guarantee: a store opened with a different
-        passphrase (same salt) must NOT be able to read the messages.
+        The central privacy guarantee: a different passphrase must NOT unlock
+        the workspace (verified access), so messages are never reachable.
         """
+        from therapy_ai.memory.session_store import AuthenticationError
+
         db_path = tmp_path / "sessions.db"
 
-        writer = SessionStore(passphrase="the-real-passphrase", db_path=db_path)
+        writer = SessionStore(db_path=db_path)
+        writer.initialize("the-real-passphrase")
         sid = writer.create_session(mood_before=5)
         writer.add_message(sid, "user", "A private thought.")
 
-        # Different passphrase, same DB + same (isolated) salt
-        attacker = SessionStore(passphrase="a-guessed-passphrase", db_path=db_path)
-
-        # Decryption must fail rather than silently return garbage
-        with pytest.raises(Exception):
-            attacker.load_messages(sid)
+        attacker = SessionStore(db_path=db_path)
+        with pytest.raises(AuthenticationError):
+            attacker.unlock("a-guessed-passphrase")
 
     def test_same_passphrase_reopens_successfully(self, tmp_path):
         db_path = tmp_path / "sessions.db"
         secret = "Something I only want to tell myself."
 
-        writer = SessionStore(passphrase="stable-passphrase", db_path=db_path)
+        writer = SessionStore(db_path=db_path)
+        writer.initialize("stable-passphrase")
         sid = writer.create_session(mood_before=5)
         writer.add_message(sid, "user", secret)
 
-        reopened = SessionStore(passphrase="stable-passphrase", db_path=db_path)
+        reopened = SessionStore(db_path=db_path)
+        reopened.unlock("stable-passphrase")
         loaded = reopened.load_messages(sid)
         assert loaded[0].content == secret
 

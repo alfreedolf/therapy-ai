@@ -1,20 +1,26 @@
 """
 therapy_ai/memory/memory_retriever.py
 
-Semantic memory retrieval using sqlite-vec — a pure SQLite extension.
-Embeds session summaries / message excerpts and retrieves the most
-emotionally relevant past context for the current user input.
+Semantic memory retrieval with PROTECTED derived storage.
 
-Why this is better than keyword-based retrieval (ContextBuilder preamble alone):
-  - Finds thematically similar past sessions even when different words are used.
-  - Surfaces the most emotionally relevant history, not just the most recent.
-  - All vectors stored in the same SQLite DB — zero extra infrastructure.
+Confidentiality model (post vault-retirement, R9/R15)
+──────────────────────────────────────────────────────
+* Source summaries are PERSISTED ENCRYPTED at rest (AES-256-GCM via the
+  workspace Encryptor) in `memory_sources(session_id, summary_enc)`.
+* The retrieval index (embeddings + plaintext summaries) is held IN MEMORY only,
+  rebuilt from decrypted sources after unlock. Nothing sensitive is written to
+  disk in plaintext.
+* A pre-existing persistent PLAINTEXT index from the old design
+  (`memory_chunks` / `memory_vectors`) is NOT silently reused. On first open we
+  detect and quarantine it (rename), logging that a migration/cleanup is needed.
 
-Requires:
-  pip install sqlite-vec sentence-transformers
+Policy (R10/R11)
+─────────────────
+* Only conversations whose stored `memory_opt_in` is True may be indexed
+  (contribution consent). Export/training authorization does NOT govern
+  indexing and is not consulted here.
 
-The embedding model runs 100% locally (no API calls).
-Recommended: all-MiniLM-L6-v2 (22 MB, very fast, good semantic quality).
+The embedding model runs 100% locally (no API calls): all-MiniLM-L6-v2.
 """
 
 from __future__ import annotations
@@ -25,82 +31,80 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Embedding dimension for all-MiniLM-L6-v2
 _EMBED_DIM = 384
 _EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 
+# Legacy plaintext artifacts from the pre-refactor design.
+_LEGACY_PLAINTEXT_TABLES = ("memory_chunks", "memory_vectors")
+
 
 def _pack_vector(vec: list[float]) -> bytes:
-    """Serialise a float list to bytes for sqlite-vec storage."""
     return struct.pack(f"{len(vec)}f", *vec)
 
 
-def _unpack_vector(data: bytes) -> list[float]:
-    n = len(data) // 4
-    return list(struct.unpack(f"{n}f", data))
+def _cosine(a: list[float], b: list[float]) -> float:
+    # Embeddings are normalized at encode time, so dot product == cosine sim.
+    return sum(x * y for x, y in zip(a, b))
 
 
 class MemoryRetriever:
     """
-    Manages a local vector index of session excerpts inside the existing SQLite DB.
-    
-    Two-table design:
-      memory_chunks     — plaintext session excerpt metadata (session_id, summary)
-      memory_vectors    — sqlite-vec virtual table holding the embeddings
+    Encrypted-source semantic memory with an in-memory retrieval index.
 
     Usage:
-        retriever = MemoryRetriever(db_path="data/sessions.db")
-        retriever.index_session(session_id, text_summary)
-        results = retriever.retrieve(query="I'm struggling with my father", top_k=3)
+        retr = MemoryRetriever(db_path=..., encryptor=store._enc)
+        retr.index_session(session_id, summary, opted_in=True)
+        hits = retr.retrieve("I'm struggling with my father", top_k=3)
+
+    The in-memory index is (re)built lazily from encrypted sources, so a fresh
+    process after unlock reconstructs it without any plaintext on disk.
     """
 
     def __init__(
         self,
-        db_path: str | Path = "data/sessions.db",
+        db_path,
+        encryptor=None,
         embed_model_id: str = _EMBED_MODEL_ID,
     ):
         self.db_path = Path(db_path)
+        self._enc = encryptor
         self._embed_model_id = embed_model_id
-        self._embedder = None   # lazy-loaded on first use
+        self._embedder = None
         self._conn = None
+        # In-memory index: session_id -> (summary_plaintext, embedding)
+        self._index: dict[str, tuple[str, list[float]]] = {}
+        self._index_loaded = False
         self._setup_db()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def index_session(self, session_id: str, text: str, is_vault: bool = False) -> None:
+    def index_session(self, session_id: str, text: str, opted_in: bool) -> None:
         """
-        Embed `text` and upsert into the vector index.
-        Call this at session close with the session's theme summary.
+        Persist an ENCRYPTED source summary and add it to the in-memory index.
 
-        VAULT GUARD: this index stores `text` as plaintext and serves it to any
-        session (including non-vault ones) with no passphrase. Vault content must
-        never enter it, or a locked session would leak into open sessions. Callers
-        must pass is_vault=True for vault sessions; indexing is then refused.
+        `opted_in` is the authoritative contribution-consent decision from the
+        store (SessionRecord.memory_opt_in). Indexing is refused when False —
+        a non-consenting conversation never enters cross-session memory.
         """
-        if is_vault:
-            logger.warning(
-                "Refusing to index vault session %s into the shared semantic "
-                "index (would leak vault content to non-vault sessions).",
+        if not opted_in:
+            logger.debug(
+                "Session %s has not opted in to memory contribution; not indexed.",
                 session_id,
             )
             return
-        vec = self._embed(text)
+        if self._enc is None:
+            raise RuntimeError("MemoryRetriever requires an unlocked workspace encryptor.")
+
         conn = self._get_conn()
-        # Upsert into metadata table
         conn.execute(
-            "INSERT OR REPLACE INTO memory_chunks(session_id, summary) VALUES (?, ?)",
-            (session_id, text),
-        )
-        # Upsert into vector table — sqlite-vec requires rowid alignment
-        rowid = conn.execute(
-            "SELECT rowid FROM memory_chunks WHERE session_id = ?", (session_id,)
-        ).fetchone()[0]
-        conn.execute(
-            "INSERT OR REPLACE INTO memory_vectors(rowid, embedding) VALUES (?, ?)",
-            (rowid, _pack_vector(vec)),
+            "INSERT OR REPLACE INTO memory_sources(session_id, summary_enc) VALUES (?, ?)",
+            (session_id, self._enc.encrypt(text)),
         )
         conn.commit()
-        logger.debug("Indexed session %s into vector memory.", session_id)
+
+        self._ensure_index_loaded()
+        self._index[session_id] = (text, self._embed(text))
+        logger.debug("Indexed session %s into protected semantic memory.", session_id)
 
     def retrieve(
         self,
@@ -108,34 +112,17 @@ class MemoryRetriever:
         top_k: int = 3,
         exclude_session_id: str | None = None,
     ) -> list[dict]:
-        """
-        Find the top_k most semantically similar past sessions to `query`.
-        Returns list of {"session_id": ..., "summary": ..., "distance": ...}
-        """
-        query_vec = self._embed(query)
-        conn = self._get_conn()
-
-        rows = conn.execute(
-            """
-            SELECT
-                c.session_id,
-                c.summary,
-                v.distance
-            FROM memory_vectors AS v
-            JOIN memory_chunks  AS c ON c.rowid = v.rowid
-            WHERE v.embedding MATCH ?
-              AND k = ?
-            ORDER BY v.distance ASC
-            """,
-            (_pack_vector(query_vec), top_k + 1),  # +1 to allow filtering current session
-        ).fetchall()
-
-        results = [
-            {"session_id": r[0], "summary": r[1], "distance": r[2]}
-            for r in rows
-            if r[0] != exclude_session_id
+        self._ensure_index_loaded()
+        if not self._index:
+            return []
+        qv = self._embed(query)
+        scored = [
+            {"session_id": sid, "summary": summ, "distance": 1.0 - _cosine(qv, emb)}
+            for sid, (summ, emb) in self._index.items()
+            if sid != exclude_session_id
         ]
-        return results[:top_k]
+        scored.sort(key=lambda d: d["distance"])
+        return scored[:top_k]
 
     def retrieve_as_context_string(
         self,
@@ -143,10 +130,6 @@ class MemoryRetriever:
         top_k: int = 3,
         exclude_session_id: str | None = None,
     ) -> str:
-        """
-        Convenience wrapper — returns a formatted string ready to inject
-        into the system prompt as a soft memory block.
-        """
         hits = self.retrieve(query, top_k=top_k, exclude_session_id=exclude_session_id)
         if not hits:
             return ""
@@ -157,24 +140,23 @@ class MemoryRetriever:
         return "\n".join(lines)
 
     def remove_session(self, session_id: str) -> None:
-        """Remove a session's vector from the index (called on session delete)."""
+        """Invalidate a session's memory (on delete or opt-out)."""
         conn = self._get_conn()
-        row = conn.execute(
-            "SELECT rowid FROM memory_chunks WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        if row:
-            conn.execute("DELETE FROM memory_vectors WHERE rowid = ?", (row[0],))
-            conn.execute("DELETE FROM memory_chunks WHERE session_id = ?", (session_id,))
-            conn.commit()
+        conn.execute("DELETE FROM memory_sources WHERE session_id = ?", (session_id,))
+        conn.commit()
+        self._index.pop(session_id, None)
+
+    def invalidate_index(self) -> None:
+        """Drop the in-memory index (e.g. on workspace lock)."""
+        self._index.clear()
+        self._index_loaded = False
 
     # ── Embedding ─────────────────────────────────────────────────────────────
 
     def _embed(self, text: str) -> list[float]:
-        """Encode text to a dense float vector using the local sentence transformer."""
         if self._embedder is None:
             self._load_embedder()
-        result = self._embedder.encode(text, normalize_embeddings=True)
-        return result.tolist()
+        return self._embedder.encode(text, normalize_embeddings=True).tolist()
 
     def _load_embedder(self) -> None:
         try:
@@ -187,33 +169,61 @@ class MemoryRetriever:
                 "Install it: pip install sentence-transformers"
             )
 
-    # ── DB setup ──────────────────────────────────────────────────────────────
+    # ── Index (re)build from encrypted sources ──────────────────────────────────
+
+    def _ensure_index_loaded(self) -> None:
+        if self._index_loaded:
+            return
+        if self._enc is None:
+            # Locked / no key: cannot decrypt sources. Leave index empty.
+            self._index_loaded = True
+            return
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT session_id, summary_enc FROM memory_sources"
+        ).fetchall()
+        for sid, enc_summary in rows:
+            try:
+                summary = self._enc.decrypt(enc_summary)
+            except Exception:
+                logger.warning("Could not decrypt memory source for %s; skipping.", sid)
+                continue
+            self._index[sid] = (summary, self._embed(summary))
+        self._index_loaded = True
+
+    # ── DB setup / legacy handling ──────────────────────────────────────────────
 
     def _setup_db(self) -> None:
         conn = self._get_conn()
-        try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
-            conn.enable_load_extension(False)
-        except Exception as e:
-            logger.warning(
-                "sqlite-vec extension not loaded (%s). "
-                "Semantic retrieval will be unavailable. "
-                "Install it: pip install sqlite-vec", e
-            )
-            return
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS memory_chunks (
+        # Quarantine any pre-existing PLAINTEXT index from the old design rather
+        # than silently reusing it.
+        existing = {
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+            ).fetchall()
+        }
+        for legacy in _LEGACY_PLAINTEXT_TABLES:
+            if legacy in existing:
+                quarantined = f"_legacy_plaintext_{legacy}"
+                if quarantined not in existing:
+                    try:
+                        conn.execute(f"ALTER TABLE {legacy} RENAME TO {quarantined}")
+                        logger.warning(
+                            "Quarantined legacy plaintext memory table %s -> %s "
+                            "(not reused; manual cleanup/migration advised).",
+                            legacy, quarantined,
+                        )
+                    except Exception as e:
+                        logger.warning("Could not quarantine legacy table %s: %s", legacy, e)
+
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS memory_sources (
                 session_id TEXT PRIMARY KEY,
-                summary    TEXT NOT NULL
-            )
-        """)
-        conn.execute(f"""
-            CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors
-            USING vec0(embedding float[{_EMBED_DIM}])
-        """)
+                summary_enc TEXT NOT NULL
+            )"""
+        )
         conn.commit()
 
     def _get_conn(self):
@@ -224,4 +234,7 @@ class MemoryRetriever:
 
     def __del__(self):
         if self._conn:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass

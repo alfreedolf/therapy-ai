@@ -2,8 +2,12 @@
 therapy_ai/ui/pages/chat.py
 
 Main therapy chat page.
-Handles session lifecycle, streaming generation, safety routing, vault-locked
-sessions, and the evidence-based session-closing ritual.
+Handles session lifecycle, streaming generation, safety routing, and the
+evidence-based session-closing ritual.
+
+All conversations belong to a single confidential encrypted workspace. There
+are no per-conversation passwords. Legacy per-conversation 'vault' records are
+not opened here; they are routed to the one-time retirement tool.
 
 Closing-mode logic
 ──────────────────
@@ -12,12 +16,6 @@ Once it reaches the threshold defined in config (session_closing.auto_close_afte
 a [CLOSING_MODE] marker is injected as a system message so the model follows the
 SESSION CLOSING protocol in system_prompt.txt. The user can also trigger closing
 manually, by a wind-down keyphrase, or by a timed-session limit.
-
-Vault logic
-───────────
-A vault session is locked with its own passphrase (separate from the app
-passphrase). Its content is encrypted with a vault key; the passphrase is held
-in st.session_state["vault_passphrase"] for the active session only.
 """
 
 from __future__ import annotations
@@ -68,7 +66,6 @@ def _ensure_state() -> None:
         "duration_min":      None,    # optional user-chosen session length (min)
         "save_by_default":   True,    # whether the session is kept on close
         "save_override":     None,    # "save"/"discard" if the user said so
-        "vault_passphrase":  None,    # in-memory vault secret for this session
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -96,15 +93,14 @@ def render() -> None:
     session_id   = st.session_state.current_session
     turn_count   = st.session_state.turn_count
     closing_mode = st.session_state.closing_mode
-    vault_pass   = st.session_state.get("vault_passphrase")
+    lifecycle_token = st.session_state.get("lifecycle_token")
 
-    # ── Vault unlock gate ─────────────────────────────────────────────────────
-    # If this session is a vault and we don't hold a valid passphrase in memory,
-    # prompt to unlock before anything is loaded or sent.
+    # ── Retirement guard ──────────────────────────────────────────────────────
+    # Unretired legacy vault conversations are NOT ordinary conversations and
+    # cannot be opened here. Direct the user to the one-time retirement tool.
     if store.is_vault(session_id):
-        if not vault_pass or not store.verify_vault_passphrase(session_id, vault_pass):
-            _render_vault_unlock_ui(store, session_id)
-            return
+        _render_retirement_required_ui(session_id)
+        return
 
     # ── Checkout form takes over the main column when requested ───────────────
     if st.session_state.checkout:
@@ -156,7 +152,7 @@ def render() -> None:
             st.rerun()
 
     # ── Chat history ──────────────────────────────────────────────────────────
-    messages = store.load_messages(session_id, vault_passphrase=vault_pass)
+    messages = store.load_messages(session_id)
     for msg in messages:
         with st.chat_message(msg.role):
             st.markdown(msg.content)
@@ -184,7 +180,7 @@ def render() -> None:
             _render_crisis_banner(safety_result.message)
             store.add_message(
                 session_id, "user", user_input, is_flagged=True,
-                vault_passphrase=vault_pass,
+                lifecycle_token=lifecycle_token,
             )
             with st.chat_message("user"):
                 st.markdown(user_input)
@@ -201,7 +197,7 @@ def render() -> None:
         # mid-conversation would end the session prematurely. Persist the
         # message first so it isn't lost, then go to the check-out form.
         if closing_mode and detect_acknowledgement(user_input, closing_cfg):
-            store.add_message(session_id, "user", user_input, vault_passphrase=vault_pass)
+            store.add_message(session_id, "user", user_input, lifecycle_token=lifecycle_token)
             st.session_state.checkout = True
             st.rerun()
 
@@ -212,45 +208,55 @@ def render() -> None:
             st.session_state.closing_mode = True
             closing_mode = True
 
-        # Persist user message
-        store.add_message(session_id, "user", user_input, vault_passphrase=vault_pass)
+        # Persist user message (guarded by the current unlocked lifecycle).
+        store.add_message(
+            session_id, "user", user_input, lifecycle_token=lifecycle_token
+        )
         with st.chat_message("user"):
             st.markdown(user_input)
 
         # Build context. Inject [CLOSING_MODE] only for the FIRST closing turn —
         # once the model has delivered one closing message, stop re-injecting so
         # it doesn't repeat the full goodbye every subsequent turn.
-        context = builder.build(
-            session_id, latest_user_text=user_input, vault_passphrase=vault_pass
-        )
+        context = builder.build(session_id, latest_user_text=user_input)
         inject_closing = closing_mode and st.session_state.closing_turns == 0
         if inject_closing:
             context = inject_closing_marker(context)
         context.append(Message(role="user", content=user_input))
 
-        # Stream response
-        with st.chat_message("assistant"):
-            response_placeholder = st.empty()
-            full_response: list[str] = []
-
-            result = None  # guard: generator may yield nothing before StopIteration
-            gen = engine.stream(context)
-            try:
-                while True:
-                    token = next(gen)
-                    full_response.append(token)
+        # Stream response into a buffer WITHOUT displaying it yet. We only show
+        # and persist the completed reply if the workspace is still unlocked
+        # under the SAME lifecycle. If the user locked mid-generation, the result
+        # from the revoked lifecycle must not be displayed or stored.
+        response_placeholder = st.empty()
+        full_response: list[str] = []
+        result = None  # generator may yield nothing before StopIteration
+        gen = engine.stream(context)
+        try:
+            while True:
+                token = next(gen)
+                full_response.append(token)
+                if store.is_unlocked and st.session_state.get("lifecycle_token") == lifecycle_token:
                     response_placeholder.markdown("".join(full_response) + "▌")
-            except StopIteration as e:
-                result = e.value
+        except StopIteration as e:
+            result = e.value
 
-            response_text = "".join(full_response)
-            response_text = safety.check_output(response_text)
-            response_placeholder.markdown(response_text)
+        # Lifecycle check: refuse to display or persist a revoked-lifecycle result.
+        try:
+            store.check_lifecycle(lifecycle_token)
+        except Exception:
+            response_placeholder.empty()
+            st.warning("Session was locked during generation; the response was discarded.")
+            st.stop()
+
+        response_text = safety.check_output("".join(full_response))
+        with st.chat_message("assistant"):
+            st.markdown(response_text)
 
         store.add_message(
             session_id, "assistant", response_text,
             tokens=result.completion_tokens if result is not None else None,
-            vault_passphrase=vault_pass,
+            lifecycle_token=lifecycle_token,
         )
 
         # Increment turn count after a completed exchange
@@ -299,39 +305,30 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
         help="If off, the session is discarded when it ends (with a confirmation).",
     )
 
-    # ── Vault lock (optional) ─────────────────────────────────────────────────
-    lock_vault = st.checkbox(
-        "🔒 Lock this session (vault)",
+    # ── Cross-session memory contribution (opt-in) ────────────────────────────
+    # All conversations are already private and encrypted. This opt-in only
+    # controls whether THIS conversation may contribute to future sessions'
+    # cross-session memory. Default OFF.
+    memory_opt_in = st.checkbox(
+        "Let this conversation inform future sessions",
+        value=False,
         help=(
-            "Encrypt this session with its own passphrase, separate from your "
-            "app passphrase. No one — not even someone who knows your app "
-            "passphrase — can read it without the vault passphrase."
+            "Off by default. When on, a short summary of this conversation may "
+            "be used as background context in later sessions. It is stored "
+            "encrypted; turning this off removes it from memory."
         ),
     )
-    vault_passphrase: str | None = None
-    if lock_vault:
-        vault_passphrase = st.text_input(
-            "Vault passphrase",
-            type="password",
-            help="You will need this exact passphrase to reopen the session.",
-        )
-        st.warning(
-            "⚠️ There is no recovery. If you forget this passphrase, the "
-            "session is permanently unreadable."
-        )
 
     col1, col2 = st.columns(2)
     with col1:
-        start_disabled = lock_vault and not vault_passphrase
         if st.button(
             "Start Session 🌿",
             use_container_width=True,
             type="primary",
-            disabled=start_disabled,
         ):
             sid = store.create_session(
                 mood_before=mood,
-                vault_passphrase=vault_passphrase if lock_vault else None,
+                memory_opt_in=memory_opt_in,
             )
             st.session_state.current_session = sid
             st.session_state.turn_count = 0
@@ -342,8 +339,6 @@ def _render_start_ui(store: SessionStore, closing_cfg: ClosingConfig) -> None:
             st.session_state.duration_min = duration_min
             st.session_state.save_by_default = save_by_default
             st.session_state.save_override = None
-            # Hold the vault passphrase in memory for THIS session only.
-            st.session_state.vault_passphrase = vault_passphrase if lock_vault else None
             st.rerun()
     with col2:
         st.info("🔒 This session is encrypted locally. Nothing leaves your device.")
@@ -366,7 +361,6 @@ def _reset_session_state() -> None:
     st.session_state.started_at = None
     st.session_state.duration_min = None
     st.session_state.save_override = None
-    st.session_state.vault_passphrase = None
 
 
 def _render_end_ui(store: SessionStore, session_id: str) -> None:
@@ -442,27 +436,27 @@ def _render_time_remaining(started_at, duration_min) -> None:
     st.caption(f"⏳ ~{mins}:{secs:02d} remaining")
 
 
-def _render_vault_unlock_ui(store: SessionStore, session_id: str) -> None:
-    """Prompt for a vault session's passphrase before its content is shown."""
-    st.markdown("### 🔒 This session is locked")
+def _render_retirement_required_ui(session_id: str) -> None:
+    """
+    A legacy per-conversation 'vault' record cannot be opened as an ordinary
+    conversation. The vault feature has been retired. Point the user to the
+    one-time retirement/conversion tool rather than attempting to decrypt it.
+    """
+    st.markdown("### 🔁 This is a legacy locked conversation")
     st.caption(
-        "Enter the vault passphrase you set when you created this session. "
-        "There is no recovery if it is lost."
+        "The per-conversation vault feature has been retired. This conversation "
+        "was locked with its own passphrase and must be converted once, using "
+        "the retirement tool, before it can be opened as an ordinary encrypted "
+        "conversation. It has not been modified."
     )
-    attempt = st.text_input("Vault passphrase", type="password", key="vault_unlock_input")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Unlock", type="primary", use_container_width=True):
-            if store.verify_vault_passphrase(session_id, attempt):
-                st.session_state.vault_passphrase = attempt
-                st.rerun()
-            else:
-                st.error("Incorrect vault passphrase.")
-    with col2:
-        if st.button("← Back", use_container_width=True):
-            st.session_state.current_session = None
-            st.session_state.vault_passphrase = None
-            st.rerun()
+    st.info(
+        "Run the one-time conversion tool (`scripts/retire_vault.py`) from a "
+        "terminal. It will ask for the original vault passphrase and convert "
+        "this conversation into your workspace."
+    )
+    if st.button("← Back", use_container_width=True):
+        st.session_state.current_session = None
+        st.rerun()
 
 
 def _render_crisis_banner(message: str) -> None:

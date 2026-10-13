@@ -77,11 +77,21 @@ def guard() -> SafetyGuard:
 
 # ── Storage fixtures ──────────────────────────────────────────────────────────
 
+TEST_PASSPHRASE = "correct-horse-battery-staple"
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> SessionStore:
-    """A real SessionStore backed by a throwaway encrypted SQLite file."""
+    """
+    A real SessionStore backed by a throwaway encrypted SQLite file, already
+    unlocked (initialised) with a known passphrase. Post vault-retirement the
+    store must be unlocked before protected ops, so the fixture initialises an
+    empty workspace for convenience.
+    """
     db_path = tmp_path / "sessions.db"
-    return SessionStore(passphrase="correct-horse-battery-staple", db_path=db_path)
+    s = SessionStore(db_path=db_path)
+    s.initialize(TEST_PASSPHRASE)
+    return s
 
 
 # ── Fake inference engine ─────────────────────────────────────────────────────

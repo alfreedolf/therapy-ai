@@ -55,6 +55,10 @@ ui:
   locale: "EN"              # Used for localised emergency resources — change to your country code (e.g. DE, IT, FR)
   theme: "calm"             # calm | dark | light (future use)
   show_token_count: false
+  # Auto-lock the workspace after this many minutes of inactivity.
+  # 0 (default) disables inactivity locking. When triggered, the key is dropped,
+  # the semantic index is cleared, and the passphrase must be re-entered.
+  lock_timeout_minutes: 0
 
 
 logging:

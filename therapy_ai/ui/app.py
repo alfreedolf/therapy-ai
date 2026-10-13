@@ -42,13 +42,14 @@ CONFIG_PATH = Path("config/default_config.yaml")
 def _init_state() -> None:
     defaults = {
         "authenticated":  False,
-        "passphrase":     None,
         "store":          None,
         "manager":        None,
         "engine":         None,
         "safety":         None,
         "context_builder":None,
         "current_session":None,
+        "lifecycle_token":None,
+        "last_activity":  None,   # epoch seconds; for inactivity auto-lock
         "page":           "chat",
     }
     for k, v in defaults.items():
@@ -77,17 +78,40 @@ def _render_passphrase_gate() -> None:
         if len(phrase) < 8:
             st.error("Passphrase must be at least 8 characters.")
             return
-        _bootstrap(phrase)
+        try:
+            _bootstrap(phrase)
+        except Exception as e:  # noqa: BLE001 — surface auth/state errors to the user
+            from therapy_ai.memory.session_store import (
+                AuthenticationError,
+                WorkspaceStateError,
+            )
+            if isinstance(e, AuthenticationError):
+                st.error("Incorrect passphrase.")
+            elif isinstance(e, WorkspaceStateError):
+                st.error(
+                    "This workspace needs attention before it can be opened "
+                    f"({e}). It was not unlocked and nothing was changed."
+                )
+            else:
+                st.error(f"Could not open workspace: {e}")
+            return
         st.rerun()
 
 
 def _bootstrap(passphrase: str) -> None:
-    """Initialise all services after passphrase entry."""
+    """
+    Verified workspace open. Initialise an empty workspace or unlock an existing
+    verified one. Legacy/ambiguous states raise WorkspaceStateError and are NOT
+    silently unlocked — the user is told to use the one-time retirement/recovery
+    path instead.
+    """
     import yaml
     cfg = yaml.safe_load(CONFIG_PATH.read_text())
     locale = cfg.get("ui", {}).get("locale", "EN")
 
-    store   = SessionStore(passphrase=passphrase)
+    store = SessionStore()
+    store.open_verified(passphrase)   # raises on wrong pass / legacy / corrupt
+
     manager = ModelManager.from_config(CONFIG_PATH)
     engine  = InferenceEngine(manager)
     safety  = SafetyGuard(locale=locale)
@@ -95,12 +119,12 @@ def _bootstrap(passphrase: str) -> None:
 
     st.session_state.update({
         "authenticated":   True,
-        "passphrase":      passphrase,
         "store":           store,
         "manager":         manager,
         "engine":          engine,
         "safety":          safety,
         "context_builder": builder,
+        "lifecycle_token": store.lifecycle_token,
     })
 
 
@@ -127,9 +151,54 @@ def _render_sidebar() -> None:
         st.divider()
         st.caption("All data is local & encrypted.")
         if st.button("🔒 Lock App", use_container_width=True):
-            for k in list(st.session_state.keys()):
-                del st.session_state[k]
+            _lock_and_clear()
             st.rerun()
+
+
+def _lock_and_clear() -> None:
+    """
+    Service-level revocation: lock the store (drops key + revokes lifecycle
+    token), invalidate the in-memory semantic index, and clear ALL session
+    state so no decrypted content, cache, or in-flight result survives.
+    """
+    store = st.session_state.get("store")
+    builder = st.session_state.get("context_builder")
+    try:
+        if builder is not None and getattr(builder, "_retriever", None) is not None:
+            builder._retriever.invalidate_index()
+    except Exception:
+        pass
+    try:
+        if store is not None:
+            store.lock()
+    except Exception:
+        pass
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+
+
+def _enforce_inactivity_lock() -> None:
+    """
+    Configurable inactivity auto-lock. Reads ui.lock_timeout_minutes from config
+    (0/absent disables). Locks and clears state if idle beyond the threshold.
+    """
+    import time
+    import yaml
+
+    try:
+        cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    except Exception:
+        return
+    timeout_min = cfg.get("ui", {}).get("lock_timeout_minutes", 0) or 0
+    if timeout_min <= 0:
+        return
+    now = time.time()
+    last = st.session_state.get("last_activity")
+    if last is not None and (now - last) > timeout_min * 60:
+        _lock_and_clear()
+        st.warning("Workspace locked due to inactivity. Please unlock again.")
+        st.stop()
+    st.session_state.last_activity = now
 
 
 # ── Main router ───────────────────────────────────────────────────────────────
@@ -141,6 +210,7 @@ def main() -> None:
         _render_passphrase_gate()
         return
 
+    _enforce_inactivity_lock()
     _render_sidebar()
 
     page = st.session_state.get("page", "chat")

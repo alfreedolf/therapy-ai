@@ -13,6 +13,12 @@ from therapy_ai.memory.session_store import SessionStore
 from therapy_ai.memory.exporter import FinetuneExporter
 
 
+def _get_retriever():
+    """Reuse the ContextBuilder's retriever so memory edits hit the live index."""
+    builder = st.session_state.get("context_builder")
+    return getattr(builder, "_retriever", None) if builder is not None else None
+
+
 def render() -> None:
     store: SessionStore = st.session_state.store
 
@@ -55,6 +61,8 @@ def render() -> None:
         st.info("No sessions yet.")
         return
 
+    retriever = _get_retriever()
+
     for s in sessions:
         label = f"{s.created_at.strftime('%Y-%m-%d %H:%M')} — Mood: {s.mood_before}→{s.mood_after or '?'}"
         if s.rating:
@@ -64,8 +72,25 @@ def render() -> None:
                 st.markdown(f"**Themes:** {', '.join(s.themes)}")
             if s.note:
                 st.markdown(f"**Note:** {s.note}")
-            if st.button(f"🗑️ Delete session", key=f"del_{s.id}"):
+
+            # Cross-session memory CONTRIBUTION consent (authoritative, persisted).
+            current = store.memory_opt_in(s.id)
+            opt_in = st.checkbox(
+                "Let this conversation inform future sessions",
+                value=current,
+                key=f"mem_{s.id}",
+                help="Stored encrypted. Turning off removes it from memory.",
+            )
+            if opt_in != current:
+                store.set_memory_opt_in(s.id, opt_in)
+                if not opt_in and retriever is not None:
+                    retriever.remove_session(s.id)  # invalidate derived memory
+                st.rerun()
+
+            if st.button("🗑️ Delete session", key=f"del_{s.id}"):
                 store.delete_session(s.id)
+                if retriever is not None:
+                    retriever.remove_session(s.id)
                 st.success("Session deleted.")
                 st.rerun()
 
