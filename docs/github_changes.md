@@ -21,6 +21,14 @@ not pushed).
    (Implemented.)
 4. **Lock lifecycle hardening** — manual/inactivity lock, lifecycle token,
    post-lock write/display prevention, index cleanup. (Implemented.)
+   UPDATE (verification pass): fixed a retained-reference revocation defect —
+   `MemoryRetriever` held a raw `Encryptor` surviving `lock()`. Now
+   lifecycle-bound via `SessionStore.encryptor_provider()`; retained retrievers
+   die on lock and are not reactivated by a later unlock. Added
+   `test_lock_lifecycle.py`, `test_ui_app.py` (AppTest), `test_coverage_audit.py`.
+   Known limits documented: AppTest ≠ true browser concurrency; inactivity
+   default stays disabled (open product decision); quarantine renames but does
+   not erase plaintext.
 5. **[Deferred] Workspace password change** — re-key + re-encrypt all app-key
    ciphertext + rewrite verifier. NOT implemented; no unsafe UI exposed.
    (Tracking issue only.)

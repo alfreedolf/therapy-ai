@@ -64,10 +64,30 @@ class MemoryRetriever:
         self,
         db_path,
         encryptor=None,
+        encryptor_provider=None,
         embed_model_id: str = _EMBED_MODEL_ID,
     ):
+        """
+        db_path:  path to the SQLite workspace DB.
+        encryptor_provider:  PREFERRED. A zero-arg callable returning the live
+            workspace Encryptor, or None when the workspace is locked / the
+            lifecycle this retriever was bound to has been revoked. Use
+            `store.encryptor_provider()` so crypto access is lifecycle-bound:
+            after lock (or a later re-unlock under a new lifecycle) the provider
+            returns None and this retriever can no longer decrypt/rebuild/index.
+        encryptor:  DEPRECATED. A raw long-lived Encryptor. Retained for existing
+            call sites/tests, but it is NOT lifecycle-bound (survives lock), so
+            production code must pass `encryptor_provider` instead.
+        """
         self.db_path = Path(db_path)
-        self._enc = encryptor
+        if encryptor_provider is not None:
+            self._enc_provider = encryptor_provider
+        elif encryptor is not None:
+            # Deprecated: wrap a raw encryptor so the internal accessor is
+            # uniform. This path is NOT lifecycle-bound by design.
+            self._enc_provider = lambda e=encryptor: e
+        else:
+            self._enc_provider = lambda: None
         self._embed_model_id = embed_model_id
         self._embedder = None
         self._conn = None
@@ -75,6 +95,11 @@ class MemoryRetriever:
         self._index: dict[str, tuple[str, list[float]]] = {}
         self._index_loaded = False
         self._setup_db()
+
+    @property
+    def _enc(self):
+        """Resolve the live encryptor via the lifecycle-bound provider (or None)."""
+        return self._enc_provider()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -112,6 +137,13 @@ class MemoryRetriever:
         top_k: int = 3,
         exclude_session_id: str | None = None,
     ) -> list[dict]:
+        # Lifecycle-bound: with no live key (locked / revoked lifecycle) we must
+        # neither rebuild nor serve a previously cached in-memory index. Drop any
+        # stale cache and return nothing.
+        if self._enc is None:
+            self._index.clear()
+            self._index_loaded = False
+            return []
         self._ensure_index_loaded()
         if not self._index:
             return []
@@ -140,7 +172,19 @@ class MemoryRetriever:
         return "\n".join(lines)
 
     def remove_session(self, session_id: str) -> None:
-        """Invalidate a session's memory (on delete or opt-out)."""
+        """
+        Invalidate a session's memory (on delete or opt-out).
+
+        Lifecycle-bound: refuses to write when the workspace is locked / the
+        bound lifecycle is revoked, consistent with the no-write-after-lock
+        guarantee. (The on-disk source is encrypted regardless; this prevents a
+        retained reference from mutating storage post-lock.)
+        """
+        if self._enc is None:
+            raise RuntimeError(
+                "MemoryRetriever is locked (no live workspace lifecycle); "
+                "refusing to modify derived memory."
+            )
         conn = self._get_conn()
         conn.execute("DELETE FROM memory_sources WHERE session_id = ?", (session_id,))
         conn.commit()

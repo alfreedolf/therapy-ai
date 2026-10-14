@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
@@ -557,6 +558,37 @@ class SessionStore:
             raise WorkspaceLockedError(
                 "Result is from a revoked workspace lifecycle; discarded."
             )
+
+    def lifecycle_encryptor(self, token: str | None) -> Encryptor | None:
+        """
+        Resolve the live workspace Encryptor ONLY if `token` matches the current
+        unlocked lifecycle; otherwise return None.
+
+        This is the lifecycle-bound authority for derived components
+        (MemoryRetriever). A component captures the token at creation and asks
+        the store for the key on each use, instead of holding a raw long-lived
+        Encryptor reference. Consequences:
+          * After lock(): token no longer matches -> None -> the component can
+            no longer decrypt, rebuild, index, or write.
+          * After a later unlock(): a NEW token is issued, so a component bound
+            to the OLD token still resolves None (no silent reactivation). Only
+            a freshly created component gets the new token.
+
+        NOTE: this governs access through supported interfaces. It does not and
+        cannot zero out memory already copied elsewhere, nor protect against
+        arbitrary in-process code reaching into private attributes.
+        """
+        if not self._unlocked or token is None or token != self._lifecycle_token:
+            return None
+        return self._enc
+
+    def encryptor_provider(self) -> Callable[[], Encryptor | None]:
+        """
+        A zero-arg provider bound to the CURRENT lifecycle token, suitable for
+        passing to a derived component so its crypto access is lifecycle-bound.
+        """
+        bound_token = self._lifecycle_token
+        return lambda: self.lifecycle_encryptor(bound_token)
 
     # ── Schema migration (additive) ────────────────────────────────────────────
 

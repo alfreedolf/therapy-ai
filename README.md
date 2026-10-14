@@ -24,7 +24,7 @@ and encrypted on your local hardware — no data ever leaves your device.
 | **Memory** | Two layers — a keyword/theme preamble from recent sessions, plus semantic retrieval of the most relevant past sessions for the current message. Sliding-window truncation on current-session history. |
 | **Safety** | Pre-LLM screening (crisis / prompt-injection / hard-block) with locale-aware crisis resources; post-LLM output token scrubbing; an automatic, clinically-modelled session-closing ritual. |
 | **Evaluation** | A composite GRPO reward signal (user rating 60% + empathy markers + response structure + safety penalty) for optional local LoRA fine-tuning on your own rated sessions. |
-| **Privacy** | AES-256-GCM at rest, PBKDF2-SHA256 (480k iters) key derived in-memory from a passphrase that is never stored. Zero telemetry. |
+| **Privacy** | Single verified, encrypted workspace: AES-256-GCM at rest, PBKDF2-SHA256 (480k iters) key derived in-memory from a passphrase that is never stored. Verified unlock (fail-closed on wrong/corrupt credentials). Manual lock (and an optional, off-by-default inactivity lock) revokes the key and in-memory derived state. Zero telemetry. (The earlier per-conversation "vault" tier is retired; a one-time conversion tool migrates any legacy vault conversation.) |
 | **Tests** | `pytest` suite structured into unit / component / e2e layers covering safety screening, encryption isolation, and the session-closing logic. |
 
 ## Architecture

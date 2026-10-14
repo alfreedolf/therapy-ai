@@ -58,7 +58,7 @@ class ContextBuilder:
             try:
                 self._retriever = MemoryRetriever(
                     db_path=store._engine.url.database,
-                    encryptor=store.active_encryptor,
+                    encryptor_provider=store.encryptor_provider(),
                 )
             except Exception as e:
                 logger.warning("Semantic memory unavailable: %s", e)

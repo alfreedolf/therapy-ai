@@ -3,6 +3,14 @@
 Branch: `refactor/retire-vault`. Synthetic-fixture implementation only.
 No live-data access, no GitHub remote writes. Updated as work proceeds.
 
+> VERIFICATION-PASS UPDATE: a retained-reference revocation DEFECT was found and
+> fixed (R12; handoff §4a). Coverage-claim audit added (handoff §4c /
+> test_coverage_audit.py). Dry-run honesty: `plan_conversion` is read-only ONLY
+> on a current schema — it constructs a `SessionStore`, whose `__init__` runs
+> additive migration/`create_all` and CAN write on a stale/empty schema. Green
+> suite ≠ full verification; several items remain open/deferred (R14, R18,
+> plaintext-erasure, inactivity default).
+
 > NOTE: The existence of a single live "vault" conversation is **user-reported**,
 > not independently verified. This refactor does not open or inspect the live
 > `data/sessions.db` / `data/.salt`.
@@ -26,10 +34,10 @@ No live-data access, no GitHub remote writes. Updated as work proceeds.
 | R9 | Protected derived storage: encrypt source summaries; in-memory index | `memory_retriever.py` rework | ✅ | test_memory_policy |
 | R10 | Memory CONTRIBUTION opt-in (authoritative, persisted, default OFF); distinct from RECEIVING | `memory_opt_in` column + policy | ✅ | test_memory_policy |
 | R11 | Export/training separate; must not govern memory indexing | indexing gated by R10 only; export unchanged | ✅ | test_memory_policy::TestExportSeparation |
-| R12 | Lock lifecycle: manual lock, inactivity lock, service revocation, cache/index cleanup, no post-lock writes/results, revoked-lifecycle token | store: lifecycle token + `_require_unlocked` + `check_lifecycle`; UI: `_lock_and_clear`, `_enforce_inactivity_lock`, buffered-then-guarded stream display | ✅ (store tested; UI logic exercised via import + store-level lifecycle tests) | test_workspace_auth::TestLockedStateEnforcement |
+| R12 | Lock lifecycle: manual lock, inactivity lock, service revocation, cache/index cleanup, no post-lock writes/results, revoked-lifecycle token | store: lifecycle token + `_require_unlocked` + `check_lifecycle` + **`lifecycle_encryptor`/`encryptor_provider`** (lifecycle-bound derived-store access, added this pass); retriever resolves key per-use via provider; UI: `_lock_and_clear`, `_enforce_inactivity_lock`, buffered-then-guarded stream display | ✅ store + lifecycle-bound revocation tested; UI via AppTest. **DEFECT FIXED this pass**: retriever previously held a raw Encryptor surviving lock (see handoff §4a). Limitation: AppTest ≠ true browser concurrency. | test_workspace_auth::TestLockedStateEnforcement; test_lock_lifecycle (all); test_ui_app::TestGenerationRevealPersistGuard,TestInactivityExpirationWithClock |
 | R13 | Versioned, workspace-local KDF/format metadata | `workspace_meta(format_version, kdf_algo, kdf_iterations)` | ✅ | test_workspace_auth |
 | R14 | Password-change behavior: specify+test OR document deferred and hide unsafe control | documented below | ⛔ (deferred, documented) | — |
-| R15 | Pre-existing persistent plaintext index artifacts quarantined, not reused | `memory_retriever._setup_db` quarantine | ✅ | test_memory_policy |
+| R15 | Pre-existing persistent plaintext index artifacts quarantined, not reused | `memory_retriever._setup_db` quarantine (RENAME to `_legacy_plaintext_*`) | ✅ not-reused; ⚠️ HONEST BOUNDARY: quarantine RENAMES, so plaintext rows REMAIN on disk under the quarantined name (not erased). "Erase plaintext" is a separate possible future requirement, not claimed. | test_memory_policy::test_legacy_plaintext_index_quarantined; test_coverage_audit::TestQuarantineHonesty |
 | R16 | Path isolation (store honors injected paths; salt isolation) | injected `db_path`; `isolated_salt` fixture | ✅ | test_workspace_auth/test_memory_policy use tmp paths |
 | R17 | Conversion-only retirement; preserve ids/history; contribution OFF; no plaintext intermediate; SQLite-consistent backup; interruption recovery | `vault_retirement.py` (`make_consistent_backup` online-backup API, `convert_vault_rows` in-txn, `validate_converted_backup`) + `scripts/retire_vault.py` (inert CLI, getpass, explicit REPLACE) | ✅ | test_vault_retirement (10 tests) |
 | R18 | Sensitive-metadata coverage honesty | documented below | ✅ (documented) | — |

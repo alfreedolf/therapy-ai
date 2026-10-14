@@ -1,30 +1,26 @@
 """
 tests/component/test_lock_lifecycle.py
 
-Focused verification of lock-lifecycle revocation at the component layer
-(pending-verification tasks 1 & 3 from docs/development_handoff.md section 5):
+Lock-lifecycle access revocation (handoff section 5, tasks 1 & 3).
 
-  * On lock, the store's active encryptor is revoked (active_encryptor -> None)
-    and protected operations fail closed.
-  * invalidate_index() clears the retriever's in-memory index so no decrypted
-    cross-session memory survives a lock (no post-lock display/leak).
-  * A retriever that has lost its encryptor cannot repopulate its index from the
-    encrypted sources on disk — retrieval yields nothing until re-unlock
-    (retained-reference revocation).
+Corrected acceptance criterion (per review):
+  invalidate_index() is CACHE invalidation, not access revocation. The real
+  guarantee is: a retriever retained before workspace lock cannot retrieve,
+  rebuild, decrypt, index, or write through supported interfaces after lock,
+  and a subsequent unlock does NOT silently reactivate an object bound to the
+  old unlocked lifecycle.
 
-These behaviors are implemented in the store (`lock`, `active_encryptor`,
-`_require_unlocked`, lifecycle token) and the retriever (`invalidate_index`,
-`_ensure_index_loaded` leaving the index empty when `_enc is None`); the UI
-(`app._lock_and_clear`) composes them. The store-level lifecycle token is
-already covered in test_workspace_auth; this module covers the retriever/
-encryptor revocation path those UI behaviors depend on.
+These tests drive the PRODUCTION revocation mechanism (`store.lock()`) and the
+lifecycle-bound encryptor provider. They do NOT manually clear `retriever._enc`
+and do NOT rely on Streamlit session_state clearing as the boundary.
 
-Synthetic fixtures only. A fake embedder keeps the tests offline/deterministic.
+Synthetic fixtures only; a fake embedder keeps the tests offline/deterministic.
 """
 
 from __future__ import annotations
 
 import math
+import sqlite3
 
 import pytest
 
@@ -51,17 +47,17 @@ class _V(list):
         return list(self)
 
 
-def _retriever_for(store) -> MemoryRetriever:
+def _lifecycle_retriever(store) -> MemoryRetriever:
+    """A retriever bound to the store's CURRENT lifecycle (production wiring)."""
     r = MemoryRetriever(
         db_path=store._engine.url.database,
-        encryptor=store.active_encryptor,
+        encryptor_provider=store.encryptor_provider(),
     )
     r._embedder = _FakeEmbedder()
     return r
 
 
 def _opted_in_session(store, text: str) -> str:
-    """Create a session that CONTRIBUTES to memory, with one message."""
     sid = store.create_session(mood_before=5)
     store.set_memory_opt_in(sid, True)
     store.add_message(sid, "user", text)
@@ -87,68 +83,102 @@ class TestStoreEncryptorRevocation:
             store.load_messages(sid)
 
 
-# ── Retriever index invalidation on lock ────────────────────────────────────────
+# ── Lifecycle-bound provider resolution ─────────────────────────────────────────
 
-class TestRetrieverInvalidationOnLock:
-    def test_invalidate_index_alone_is_insufficient_without_key_revocation(self, store):
+class TestLifecycleEncryptorProvider:
+    def test_provider_resolves_while_unlocked(self, store):
+        provider = store.encryptor_provider()
+        assert provider() is not None
+
+    def test_provider_resolves_none_after_lock(self, store):
+        provider = store.encryptor_provider()
+        store.lock()
+        assert provider() is None
+
+    def test_old_provider_stays_none_after_reunlock(self, store):
+        """A provider bound to the OLD lifecycle must not reactivate on unlock."""
+        old_provider = store.encryptor_provider()
+        store.lock()
+        store.unlock(TEST_PASSPHRASE)  # NEW lifecycle, new token
+        assert old_provider() is None  # old binding stays revoked
+        # A freshly obtained provider works again.
+        assert store.encryptor_provider()() is not None
+
+
+# ── Retained-retriever revocation through PRODUCTION mechanism ──────────────────
+
+class TestRetainedRetrieverRevocation:
+    def test_retained_retriever_cannot_retrieve_or_write_after_lock(self, store):
         """
-        VERIFICATION FINDING: invalidate_index() clears the in-memory index, but
-        if the retriever still holds a live encryptor, the next retrieve() call
-        repopulates the index from the encrypted sources on disk. Invalidation is
-        therefore only safe when the encryptor reference is ALSO revoked.
-
-        In the real UI this is correct: app._lock_and_clear() invalidates the
-        index, locks the store, and then deletes all session_state (discarding
-        the retriever object entirely), so no retained retriever survives with a
-        live key. This test pins down the dependency so a future change that
-        invalidates WITHOUT dropping the key doesn't silently reintroduce a leak.
+        Core regression (item 1): retain a retriever, lock via the production
+        mechanism, and confirm it can neither retrieve nor index/write — WITHOUT
+        touching retriever internals.
         """
         sid = _opted_in_session(store, "my father and work")
-        retr = _retriever_for(store)
+        retr = _lifecycle_retriever(store)
         retr.index_session(sid, "my father and work", opted_in=True)
-        assert retr.retrieve("father", top_k=3)
+        assert retr.retrieve("father", top_k=3)  # works while unlocked
 
-        # Invalidation alone: a retriever that still has its key rebuilds.
-        retr.invalidate_index()
-        assert retr.retrieve("father", top_k=3), (
-            "invalidate_index() alone should not be relied on for lock safety; "
-            "the encryptor reference must also be revoked"
-        )
+        # Production revocation — no manual _enc clearing.
+        store.lock()
 
-        # Invalidation + key revocation (what lock actually entails): empty.
-        retr._enc = None
-        retr.invalidate_index()
+        # Retrieval: nothing (no rebuild, no serving a stale cache).
         assert retr.retrieve("father", top_k=3) == []
+        # Indexing/writing through the retained reference: refused.
+        with pytest.raises(RuntimeError):
+            retr.index_session(sid, "my father and work", opted_in=True)
+        with pytest.raises(RuntimeError):
+            retr.remove_session(sid)
 
-    def test_no_repopulation_without_encryptor(self, store):
-        """
-        After the index is invalidated AND the encryptor is gone, the retriever
-        must not be able to rebuild the index from the encrypted sources on disk.
-        This is the retained-reference revocation guarantee: a surviving
-        retriever object yields nothing once the workspace is locked.
-        """
+    def test_retained_retriever_stays_dead_after_reunlock(self, store):
+        """A subsequent unlock must not silently reactivate the old retriever."""
         sid = _opted_in_session(store, "trouble at work and sleep")
-        retr = _retriever_for(store)
+        retr = _lifecycle_retriever(store)
         retr.index_session(sid, "trouble at work and sleep", opted_in=True)
         assert retr.retrieve("work", top_k=3)
 
-        # Workspace lock: store drops its key; UI also drops the retriever's.
         store.lock()
-        retr._enc = None            # mirror app._lock_and_clear dropping the ref
-        retr.invalidate_index()
+        store.unlock(TEST_PASSPHRASE)  # new lifecycle
 
-        # Encrypted sources still exist on disk, but with no key the index stays
-        # empty — nothing decrypts, nothing is returned.
+        # The retained retriever is bound to the OLD lifecycle → still dead.
         assert retr.retrieve("work", top_k=3) == []
-        assert retr._index == {}
+        with pytest.raises(RuntimeError):
+            retr.index_session(sid, "trouble at work and sleep", opted_in=True)
 
-    def test_encrypted_source_persists_but_is_not_plaintext(self, store, tmp_path):
-        """Lock must not expose the source; the on-disk summary stays ciphertext."""
-        import sqlite3
+    def test_fresh_retriever_after_reunlock_works(self, store):
+        """A newly authorized retriever operates normally after re-unlock."""
+        sid = _opted_in_session(store, "father and work and sleep")
+        retr = _lifecycle_retriever(store)
+        retr.index_session(sid, "father and work and sleep", opted_in=True)
 
-        secret = "father conflict detail"
+        store.lock()
+        store.unlock(TEST_PASSPHRASE)
+
+        fresh = _lifecycle_retriever(store)  # bound to the new lifecycle
+        assert fresh.retrieve("father", top_k=3)  # rebuilds from encrypted sources
+
+    def test_cache_not_served_after_lock(self, store):
+        """
+        Even with the index already loaded in memory before lock, a locked
+        retrieve() must not serve the cached plaintext summaries.
+        """
+        sid = _opted_in_session(store, "father father work")
+        retr = _lifecycle_retriever(store)
+        retr.index_session(sid, "father father work", opted_in=True)
+        assert retr._index  # cache populated in memory
+
+        store.lock()
+        assert retr.retrieve("father", top_k=3) == []
+        assert retr._index == {}  # stale cache dropped on locked access
+
+
+# ── On-disk confidentiality is independent of lock state ────────────────────────
+
+class TestSourceCiphertextAtRest:
+    def test_encrypted_source_never_plaintext(self, store):
+        secret = "father conflict specific detail"
         sid = _opted_in_session(store, secret)
-        retr = _retriever_for(store)
+        retr = _lifecycle_retriever(store)
         retr.index_session(sid, secret, opted_in=True)
         store.lock()
 
@@ -159,23 +189,4 @@ class TestRetrieverInvalidationOnLock:
             raw.close()
         assert rows
         for (stored,) in rows:
-            assert secret not in stored  # ciphertext only, even after lock
-
-
-# ── Re-unlock restores retrieval ────────────────────────────────────────────────
-
-class TestReUnlockRestores:
-    def test_fresh_retriever_after_reunlock_retrieves_again(self, store, tmp_path):
-        sid = _opted_in_session(store, "father and work and sleep")
-        retr = _retriever_for(store)
-        retr.index_session(sid, "father and work and sleep", opted_in=True)
-
-        db = store._engine.url.database
-        store.lock()
-        store.unlock(TEST_PASSPHRASE)
-
-        # A retriever rebuilt with the re-derived encryptor repopulates from the
-        # encrypted sources and can retrieve again.
-        retr2 = MemoryRetriever(db_path=db, encryptor=store.active_encryptor)
-        retr2._embedder = _FakeEmbedder()
-        assert retr2.retrieve("father", top_k=3)
+            assert secret not in stored  # ciphertext only
